@@ -26,23 +26,23 @@ main (int argc, char *argv[])
 	GstRTSPServer *server;
 	GstRTSPMountPoints *mounts;
 	GstRTSPMediaFactory *factory;
-	
+
 	gst_init (&argc, &argv);
-	
+
 	loop = g_main_loop_new (NULL, FALSE);
 	server = gst_rtsp_server_new ();
 	mounts = gst_rtsp_server_get_mount_points (server);
-	
+
 	factory = gst_rtsp_media_factory_new ();
 	gst_rtsp_media_factory_set_launch (factory, "( dreamvideosource ! h264parse ! rtph264pay name=pay0 pt=96   dreamaudiosource ! aacparse ! rtpmp4apay name=pay1 pt=97 )");
-	
+
 	gst_rtsp_mount_points_add_factory (mounts, "/stream", factory);
 	g_object_unref (mounts);
-	
+
 	gst_rtsp_server_attach (server, NULL);
-	
-	g_print ("dreambox encoder stream ready at rtsp://127.0.0.1:8554/test\n");
+
+	g_print ("dreambox encoder stream ready at rtsp://127.0.0.1:8554/stream\n");
 	g_main_loop_run (loop);
-	
+
 	return 0;
 }
