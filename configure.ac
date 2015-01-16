@@ -23,6 +23,8 @@ AC_TYPE_SIZE_T
 # Check for Gstreamer 1.0
 PKG_CHECK_MODULES(GST, [gstreamer-1.0], [])
 PKG_CHECK_MODULES(GSTRTSPSERVER, [gstreamer-rtsp-server-1.0], [])
+PKG_CHECK_MODULES(GSTAPP, [gstreamer-app-1.0 ], [])
+PKG_CHECK_MODULES(GIO, [gio-2.0 ], [])
 
 AC_CONFIG_FILES([
 Makefile
