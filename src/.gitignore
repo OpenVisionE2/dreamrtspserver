@@ -1,1 +1,4 @@
-bdremux
+dreamrtspserver
+*.o
+Makefile
+Makefile.in
