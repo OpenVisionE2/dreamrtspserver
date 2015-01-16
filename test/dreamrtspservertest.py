@@ -1,3 +1,4 @@
+#!/usr/bin/python
 import dbus
 
 class RTSPServerControl(object):
