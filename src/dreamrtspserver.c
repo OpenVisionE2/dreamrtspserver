@@ -91,7 +91,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	}
 	else if (g_strcmp0 (property_name, "videoBitrate") == 0)
 	{
-		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamaudiosource");
+		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource");
 		gint rate = 0;
 		if (source)
 			g_object_get (G_OBJECT (source), "bitrate", &rate, NULL);
@@ -340,11 +340,11 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 {
 	DreamRTSPserver *s = user_data;
 
-	GstElement * appsrc = NULL;
+	GstAppSrc* appsrc = NULL;
 	if ( appsink == s->vappsink )
-		appsrc = s->vappsrc;
+		appsrc = GST_APP_SRC(s->vappsrc);
 	else if ( appsink == s->aappsink )
-		appsrc = s->aappsrc;
+		appsrc = GST_APP_SRC(s->aappsrc);
 
 	g_mutex_lock (&s->rtsp_mutex);
 	if (appsrc) {
@@ -355,7 +355,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 
 		GstBuffer *tmp;
 		tmp = gst_buffer_copy (buffer);
-		g_print ("%" GST_TIME_FORMAT "\n", GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
+		GST_LOG("%" GST_TIME_FORMAT "\n", GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
 		if (s->rtsp_start_pts == GST_CLOCK_TIME_NONE) {
 			s->rtsp_start_pts = GST_BUFFER_PTS (tmp);
 			s->rtsp_start_dts = GST_BUFFER_DTS (tmp);
@@ -364,8 +364,11 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		else GST_BUFFER_PTS (tmp) -= s->rtsp_start_pts;
 		GST_BUFFER_DTS (tmp) -= s->rtsp_start_dts;
 
-		gst_app_src_set_caps (GST_APP_SRC (appsrc), caps);
-		gst_app_src_push_buffer (GST_APP_SRC (appsrc), tmp);
+		GstCaps *oldcaps = gst_app_src_get_caps (appsrc);
+		if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
+			gst_app_src_set_caps (appsrc, caps);
+
+		gst_app_src_push_buffer (appsrc, tmp);
 		gst_sample_unref (sample);
 	}
 	else
