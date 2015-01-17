@@ -424,6 +424,11 @@ int main (int argc, char *argv[])
 	s.aappsink = gst_element_factory_make ("appsink", "aappsink");
 	s.vappsink = gst_element_factory_make ("appsink", "vappsink");
 
+	if (!asrc || !vsrc || !aparse || !vparse || !aq || !vq || !s.aappsink || !s.vappsink)
+	{
+		g_error ("Failed to create element(s): %s%s%s%s%s%s%s%s", asrc?"":"dreamaudiosource", vsrc?"":"dreamvideosource", aparse?"":"aacparse", vparse?"":"h264parse", aq?"":"aqueue", vq?"":"vqueue", s.aappsink?"":"aappsink", s.vappsink?"":"vappsink");
+	}
+
 	gst_bin_add_many (GST_BIN (s.pipeline), asrc, vsrc, aparse, vparse, aq, vq, s.aappsink, s.vappsink, NULL);
 	gst_element_link_many (asrc, aparse, aq, s.aappsink, NULL);
 	gst_element_link_many (vsrc, vparse, vq, s.vappsink, NULL);
