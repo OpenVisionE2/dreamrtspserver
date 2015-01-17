@@ -355,14 +355,18 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 
 		GstBuffer *tmp;
 		tmp = gst_buffer_copy (buffer);
-		GST_LOG("%" GST_TIME_FORMAT "\n", GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
+		GST_LOG("original PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
 		if (s->rtsp_start_pts == GST_CLOCK_TIME_NONE) {
 			s->rtsp_start_pts = GST_BUFFER_PTS (tmp);
 			s->rtsp_start_dts = GST_BUFFER_DTS (tmp);
+			GST_INFO("set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
 		}
-		if (GST_BUFFER_PTS (tmp) < s->rtsp_start_pts) GST_BUFFER_PTS (tmp) = 0;
-		else GST_BUFFER_PTS (tmp) -= s->rtsp_start_pts;
+		if (GST_BUFFER_PTS (tmp) < s->rtsp_start_pts)
+			GST_BUFFER_PTS (tmp) = 0;
+		else
+			GST_BUFFER_PTS (tmp) -= s->rtsp_start_pts;
 		GST_BUFFER_DTS (tmp) -= s->rtsp_start_dts;
+		GST_LOG("new PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
 
 		GstCaps *oldcaps = gst_app_src_get_caps (appsrc);
 		if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
@@ -438,6 +442,8 @@ int main (int argc, char *argv[])
 
 	s.factory = gst_rtsp_media_factory_new ();
 	gst_rtsp_media_factory_set_launch (s.factory, "( appsrc name=vappsrc ! h264parse ! rtph264pay name=pay0 pt=96   appsrc name=aappsrc ! aacparse ! rtpmp4apay name=pay1 pt=97 )");
+
+	gst_rtsp_media_factory_set_shared(s.factory, TRUE);
 
 	gst_rtsp_mount_points_add_factory (s.mounts, "/stream", s.factory);
 	g_object_unref (s.mounts);
