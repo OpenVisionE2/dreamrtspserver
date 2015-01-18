@@ -86,8 +86,8 @@ static gboolean gst_set_framerate(DreamRTSPserver *s, int value)
 	if (value)
 	{
 		GValue *framerate;
-		gst_value_set_fraction (framerate, 1, value);
-		gst_structure_set (structure, "framerate", G_TYPE_INT, value, NULL);
+		gst_value_set_fraction (framerate, value, 1);
+		gst_structure_set (structure, "framerate", G_TYPE_INT, framerate, NULL);
 	}
 	gst_caps_append_structure (caps, structure);
 	GST_INFO("new caps %" GST_PTR_FORMAT, caps);
@@ -151,7 +151,7 @@ static gboolean gst_get_capsprop(DreamRTSPserver *s, const gchar* element_name, 
 	if (g_strcmp0 (prop_name, "framerate") == 0 && value)
 	{
 		const GValue *framerate = gst_structure_get_value (structure, "framerate");
-		*value = gst_value_get_fraction_denominator (framerate);
+		*value = gst_value_get_fraction_numerator (framerate);
 	}
 	else if ((g_strcmp0 (prop_name, "width") == 0 || g_strcmp0 (prop_name, "height") == 0) && value)
 	{
