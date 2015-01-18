@@ -20,7 +20,6 @@
 #include <gio/gio.h>
 #include <gst/gst.h>
 #include <gst/app/app.h>
-#include <stdio.h>
 #include <gst/rtsp-server/rtsp-server.h>
 
 GST_DEBUG_CATEGORY (dreamrtspserver_debug);
@@ -49,12 +48,124 @@ static const gchar introspection_xml[] =
   "      <arg type='b' name='state' direction='in'/>"
   "      <arg type='b' name='result' direction='out'/>"
   "    </method>"
+  "    <method name='setResolution'>"
+  "      <arg type='i' name='width' direction='in'/>"
+  "      <arg type='i' name='height' direction='in'/>"
+  "    </method>"
   "    <property type='b' name='state' access='read'/>"
   "    <property type='i' name='clients' access='read'/>"
   "    <property type='i' name='audioBitrate' access='readwrite'/>"
   "    <property type='i' name='videoBitrate' access='readwrite'/>"
+  "    <property type='i' name='framerate' access='readwrite'/>"
+  "    <property type='i' name='width' access='read'/>"
+  "    <property type='i' name='height' access='read'/>"
   "  </interface>"
   "</node>";
+
+static gboolean gst_set_framerate(DreamRTSPserver *s, int value)
+{
+	GstElement *element;
+	GstCaps *caps;
+	GstStructure *structure;
+
+	element = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource");
+	if (!element)
+		return FALSE;
+
+	g_object_get (G_OBJECT (element), "caps", &caps, NULL);
+
+	if (!GST_IS_CAPS(caps))
+		return FALSE;
+
+	GST_INFO("old caps %" GST_PTR_FORMAT, caps);
+
+	structure = gst_caps_steal_structure (caps, 0);
+	if (!structure)
+		return FALSE;
+
+	if (value)
+	{
+		GValue *framerate;
+		gst_value_set_fraction (framerate, 1, value);
+		gst_structure_set (structure, "framerate", G_TYPE_INT, value, NULL);
+	}
+	gst_caps_append_structure (caps, structure);
+	GST_INFO("new caps %" GST_PTR_FORMAT, caps);
+	g_object_set (G_OBJECT (element), "caps", &caps, NULL);
+	return TRUE;
+}
+
+static gboolean gst_set_resolution(DreamRTSPserver *s, int width, int height)
+{
+	GstElement *element;
+	GstCaps *caps;
+	GstStructure *structure;
+
+	element = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource");
+	if (!element)
+		return FALSE;
+
+	g_object_get (G_OBJECT (element), "caps", &caps, NULL);
+
+	if (!GST_IS_CAPS(caps))
+		return FALSE;
+
+	GST_INFO("old caps %" GST_PTR_FORMAT, caps);
+
+	structure = gst_caps_steal_structure (caps, 0);
+	if (!structure)
+		return FALSE;
+
+	if (width && height)
+	{
+		gst_structure_set (structure, "width", G_TYPE_INT, width, NULL);
+		gst_structure_set (structure, "height", G_TYPE_INT, height, NULL);
+	}
+	gst_caps_append_structure (caps, structure);
+	GST_INFO("new caps %" GST_PTR_FORMAT, caps);
+	g_object_set (G_OBJECT (element), "caps", &caps, NULL);
+	return TRUE;
+}
+
+static gboolean gst_get_capsprop(DreamRTSPserver *s, const gchar* element_name, const gchar* prop_name, guint32 *value)
+{
+	GstElement *element;
+	GstCaps *caps;
+	const GstStructure *structure;
+
+	element = gst_bin_get_by_name(GST_BIN(s->pipeline), element_name);
+	if (!element)
+		return FALSE;
+
+	g_object_get (G_OBJECT (element), "caps", &caps, NULL);
+
+	if (!GST_IS_CAPS(caps))
+		return FALSE;
+
+	GST_INFO("current caps %" GST_PTR_FORMAT, caps);
+
+	structure = gst_caps_get_structure (caps, 0);
+	if (!structure)
+		return FALSE;
+
+	if (g_strcmp0 (prop_name, "framerate") == 0 && value)
+	{
+		const GValue *framerate = gst_structure_get_value (structure, "framerate");
+		*value = gst_value_get_fraction_denominator (framerate);
+	}
+	else if ((g_strcmp0 (prop_name, "width") == 0 || g_strcmp0 (prop_name, "height") == 0) && value)
+	{
+		gst_structure_get_int (structure, prop_name, value);
+	}
+	else
+		return FALSE;
+
+	gst_caps_unref(caps);
+
+	GST_INFO("%s.%s = %i", element_name, prop_name, *value);
+
+	return TRUE;
+}
 
 static GVariant *handle_get_property (GDBusConnection  *connection,
 		const gchar      *sender,
@@ -66,10 +177,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 {
 	DreamRTSPserver *s = user_data;
 
-	fprintf (stderr, "[RTSPserver] "
-	"handle_get_property (%p,\"%s\",\"%s\",\"%s\",\"%s\",(error),%p)\n",
-		connection, sender, object_path, interface_name, property_name,
-	user_data);
+	GST_DEBUG("dbus get property %s = %s from %s", property_name, sender);
 
 	if (g_strcmp0 (property_name, "state") == 0)
 	{
@@ -97,11 +205,15 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 			g_object_get (G_OBJECT (source), "bitrate", &rate, NULL);
 		return g_variant_new_int32 (rate);
 	}
-	g_set_error (error,
-		G_IO_ERROR,
-	G_IO_ERROR_FAILED,
-	"[RTSPserver] Invalid property '%s'",
-	property_name);
+	else if (g_strcmp0 (property_name, "width") == 0 || g_strcmp0 (property_name, "height") == 0 || g_strcmp0 (property_name, "framerate") == 0)
+	{
+		guint32 value;
+		if (gst_get_capsprop(s, "dreamvideosource", property_name, &value))
+			return g_variant_new_int32(value);
+		GST_WARNING("can't handle_get_property name=%s", property_name);
+		return g_variant_new_int32(0);
+	}
+	g_set_error (error, G_IO_ERROR,	G_IO_ERROR_FAILED, "[RTSPserver] Invalid property '%s'", property_name);
 	return NULL;
 } // handle_get_property
 
@@ -117,10 +229,7 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 	DreamRTSPserver *s = user_data;
 
 	gchar *valstr = g_variant_print (value, TRUE);
-	fprintf (stderr, "[RTSPserver] "
-	"handle_set_property (%p,\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",(error),%p)\n",
-		 connection, sender, object_path, interface_name, property_name,
-	  valstr, user_data);
+	GST_DEBUG("dbus set property %s = %s from %s", property_name, valstr, sender);
 	g_free (valstr);
 
 	if (g_strcmp0 (property_name, "audioBitrate") == 0)
@@ -135,15 +244,17 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 		g_object_set (G_OBJECT (source), "bitrate", g_variant_get_int32 (value), NULL);
 		return 1;
 	}
+	else if (g_strcmp0 (property_name, "framerate") == 0)
+	{
+		if (gst_set_framerate(s, g_variant_get_int32 (value)))
+			return 1;
+		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] can't set property '%s' to %d", property_name, value);
+	}
 	else
 	{
-		g_set_error (error,
-			     G_IO_ERROR,
-	       G_IO_ERROR_FAILED,
-	       "[RTSPserver] Invalid property: '%s'",
-	       property_name);
-		return 0;
+		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] Invalid property: '%s'", property_name);
 	} // unknown property
+	return 0;
 } // handle_set_property
 
 static void handle_method_call (GDBusConnection       *connection,
@@ -158,10 +269,7 @@ static void handle_method_call (GDBusConnection       *connection,
 	DreamRTSPserver *s = user_data;
 
 	gchar *paramstr = g_variant_print (parameters, TRUE);
-	fprintf (stderr, "[RTSPserver] "
-	"handle_method_call (%p,\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",(invocation),%p)\n",
-		connection, sender, object_path, interface_name, method_name,
-	paramstr, user_data);
+	GST_DEBUG("dbus handle method %s %s from %s", method_name, paramstr, sender);
 	g_free (paramstr);
 
 	// Method one: HelloWorld
@@ -177,16 +285,21 @@ static void handle_method_call (GDBusConnection       *connection,
 		else
 			result = g_variant_new ("(b)", TRUE);
 		g_dbus_method_invocation_return_value (invocation, result);
-	} // if it's HelloWorld
+	}
+	else if (g_strcmp0 (method_name, "setResolution") == 0)
+	{
+		int width, height;
+		g_variant_get (parameters, "(ii)", &width, &height);
 
+		if (gst_set_resolution(s, width, height))
+			g_dbus_method_invocation_return_value (invocation, NULL);
+		else
+			g_dbus_method_invocation_return_error (invocation, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "[RTSPserver] can't set resolution %dx%d", width, height);
+	}
 	// Default: No such method
 	else
 	{
-		g_dbus_method_invocation_return_error (invocation,
-							G_IO_ERROR,
-					G_IO_ERROR_INVALID_ARGUMENT,
-					"[RTSPserver] Invalid method: '%s'",
-					method_name);
+		g_dbus_method_invocation_return_error (invocation, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "[RTSPserver] Invalid method: '%s'", method_name);
 	} // if it's an unknown method
 } // handle_method_call
 
@@ -204,9 +317,7 @@ static void on_bus_acquired (GDBusConnection *connection,
 	guint registration_id;
 	GError *error = NULL;
 
-	// A bit of (optional) notification
-	fprintf (stderr, "[RTSPserver] on_bus_acquired (%p, \"%s\", %p)\n",
-		connection, name, user_data);
+	GST_DEBUG ("aquired dbus (\"%s\" @ %p)", name, connection);
 
 	registration_id =
 	g_dbus_connection_register_object (connection,
@@ -223,8 +334,7 @@ static void on_name_acquired (GDBusConnection *connection,
 		const gchar     *name,
 		gpointer         user_data)
 {
-	fprintf (stderr, "[RTSPserver] on_name_acquired (%p, \"%s\", %p)\n",
-		connection, name, user_data);
+	GST_DEBUG ("aquired dbus name (\"%s\")", name);
 } // on_name_acquired
 
 static void on_name_lost (GDBusConnection *connection,
@@ -233,10 +343,8 @@ static void on_name_lost (GDBusConnection *connection,
 {
 	DreamRTSPserver *s = user_data;
 
-	fprintf (stderr, "[RTSPserver] on_name_lost (%p, \"%s\", %p)\n",
-		connection, name, user_data);
-	// Things seem to have gone badly wrong, so give up
-	g_main_loop_quit (s->loop);
+	GST_WARNING ("lost dbus name (\"%s\" @ %p)", name, connection);
+// 	g_main_loop_quit (s->loop);
 } // on_name_lost
 
 static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_data)
@@ -315,24 +423,22 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 {
 	DreamRTSPserver *s = user_data;
 	s->clients_count--;
-	g_print("media_unprepare, clients_count=%i\n", s->clients_count);
+	GST_INFO("media_unprepare, clients_count=%i", s->clients_count);
 }
 
 static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media, gpointer user_data)
 {
-	g_print("media_configure\n");
 	DreamRTSPserver *s = user_data;
-
-	GstElement *element = gst_rtsp_media_get_element (media);
-
 	g_mutex_lock (&s->rtsp_mutex);
+	s->clients_count++;
+	GST_INFO("media_configure, clients_count=%i", s->clients_count);
+	GstElement *element = gst_rtsp_media_get_element (media);
 	s->aappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "aappsrc");
 	s->vappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "vappsrc");
 	g_signal_connect (media, "unprepared", (GCallback) media_unprepare, s);
 	g_object_set (s->aappsrc, "format", GST_FORMAT_TIME, NULL);
 	g_object_set (s->vappsrc, "format", GST_FORMAT_TIME, NULL);
 	s->rtsp_start_pts = s->rtsp_start_dts = GST_CLOCK_TIME_NONE;
-	s->clients_count++;
 	g_mutex_unlock (&s->rtsp_mutex);
 }
 
@@ -348,7 +454,6 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 
 	g_mutex_lock (&s->rtsp_mutex);
 	if (appsrc) {
-		g_print("#");
 		GstSample *sample = gst_app_sink_pull_sample (GST_APP_SINK (appsink));
 		GstBuffer *buffer = gst_sample_get_buffer (sample);
 		GstCaps *caps = gst_sample_get_caps (sample);
@@ -376,7 +481,11 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		gst_sample_unref (sample);
 	}
 	else
-		g_print (".");
+		g_print ("loglevel = %i >= %i?", gst_debug_category_get_threshold (dreamrtspserver_debug), GST_LEVEL_DEBUG);
+		if ( gst_debug_category_get_threshold (dreamrtspserver_debug) >= GST_LEVEL_DEBUG)
+			GST_LOG("no rtsp clients, discard payload!");
+		else
+			g_print (".");
 	g_mutex_unlock (&s->rtsp_mutex);
 
 	return GST_FLOW_OK;
@@ -465,6 +574,8 @@ int main (int argc, char *argv[])
 	gst_bus_add_signal_watch (bus);
 	g_signal_connect (G_OBJECT (bus), "message", G_CALLBACK (message_cb), &s);
 	gst_object_unref (GST_OBJECT (bus));
+	
+	gst_element_set_state (s.pipeline, GST_STATE_PAUSED);
 
 	g_main_loop_run (s.loop);
 
