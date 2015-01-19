@@ -248,7 +248,7 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 	{
 		if (gst_set_framerate(s, g_variant_get_int32 (value)))
 			return 1;
-		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] can't set property '%s' to %d", property_name, value);
+		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] can't set property '%s' to %d", property_name, g_variant_get_int32 (value));
 	}
 	else
 	{
