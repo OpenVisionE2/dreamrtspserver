@@ -77,21 +77,18 @@ static gboolean gst_set_framerate(DreamRTSPserver *s, int value)
 	if (!GST_IS_CAPS(caps))
 		return FALSE;
 
-	GST_INFO("old caps %" GST_PTR_FORMAT, caps);
+	GST_INFO("gst_set_framerate %d old caps %" GST_PTR_FORMAT, value, caps);
 
 	structure = gst_caps_steal_structure (caps, 0);
 	if (!structure)
 		return FALSE;
 
 	if (value)
-	{
-		GValue *framerate;
-		gst_value_set_fraction (framerate, value, 1);
-		gst_structure_set (structure, "framerate", G_TYPE_INT, framerate, NULL);
-	}
+		gst_structure_set (structure, "framerate", GST_TYPE_FRACTION, value, 1, NULL);
+
 	gst_caps_append_structure (caps, structure);
 	GST_INFO("new caps %" GST_PTR_FORMAT, caps);
-	g_object_set (G_OBJECT (element), "caps", &caps, NULL);
+	g_object_set (G_OBJECT (element), "caps", caps, NULL);
 	return TRUE;
 }
 
@@ -537,9 +534,23 @@ int main (int argc, char *argv[])
 	s.aappsink = gst_element_factory_make ("appsink", "aappsink");
 	s.vappsink = gst_element_factory_make ("appsink", "vappsink");
 
-	if (!asrc || !vsrc || !aparse || !vparse || !aq || !vq || !s.aappsink || !s.vappsink)
+	GstElement *appsrc, *vpay, *apay, *udpsrc;
+	appsrc = gst_element_factory_make ("appsrc", NULL);
+	vpay = gst_element_factory_make ("rtph264pay", NULL);
+	apay = gst_element_factory_make ("rtpmp4apay", NULL);
+	udpsrc = gst_element_factory_make ("udpsrc", NULL);
+
+	if (!asrc || !vsrc || !aparse || !vparse || !aq || !vq || !s.aappsink || !s.vappsink || !appsrc || !vpay || !apay || !udpsrc)
 	{
-		g_error ("Failed to create element(s): %s%s%s%s%s%s%s%s", asrc?"":"dreamaudiosource", vsrc?"":"dreamvideosource", aparse?"":"aacparse", vparse?"":"h264parse", aq?"":"aqueue", vq?"":"vqueue", s.aappsink?"":"aappsink", s.vappsink?"":"vappsink");
+		g_error ("Failed to create element(s):%s%s%s%s%s%s%s%s%s%s%s%s", asrc?"":" dreamaudiosource", vsrc?"":" dreamvideosource", aparse?"":" aacparse", vparse?"":" h264parse", aq?"":" aqueue",
+			vq?"":" vqueue", s.aappsink?"":" aappsink", s.vappsink?"":" vappsink", appsrc?"":" appsrc", vpay?"": "rtph264pay", apay?"":" rtpmp4apay", udpsrc?"":" udpsrc" );
+	}
+	else
+	{
+		gst_object_unref (appsrc);
+		gst_object_unref (vpay);
+		gst_object_unref (apay);
+		gst_object_unref (udpsrc);
 	}
 
 	gst_bin_add_many (GST_BIN (s.pipeline), asrc, vsrc, aparse, vparse, aq, vq, s.aappsink, s.vappsink, NULL);
