@@ -123,7 +123,7 @@ static gboolean gst_set_resolution(DreamRTSPserver *s, int width, int height)
 	}
 	gst_caps_append_structure (caps, structure);
 	GST_INFO("new caps %" GST_PTR_FORMAT, caps);
-	g_object_set (G_OBJECT (element), "caps", &caps, NULL);
+	g_object_set (G_OBJECT (element), "caps", caps, NULL);
 	return TRUE;
 }
 
@@ -177,7 +177,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 {
 	DreamRTSPserver *s = user_data;
 
-	GST_DEBUG("dbus get property %s = %s from %s", property_name, sender);
+	GST_DEBUG("dbus get property %s from %s", property_name, sender);
 
 	if (g_strcmp0 (property_name, "state") == 0)
 	{
@@ -471,21 +471,25 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		else
 			GST_BUFFER_PTS (tmp) -= s->rtsp_start_pts;
 		GST_BUFFER_DTS (tmp) -= s->rtsp_start_dts;
-		GST_LOG("new PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
+// 		GST_LOG("new PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
 
 		GstCaps *oldcaps = gst_app_src_get_caps (appsrc);
 		if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
+		{
+			GST_LOG("CAPS changed! %" GST_PTR_FORMAT " to %" GST_PTR_FORMAT, oldcaps, caps);
 			gst_app_src_set_caps (appsrc, caps);
+		}
 
 		gst_app_src_push_buffer (appsrc, tmp);
 		gst_sample_unref (sample);
 	}
 	else
-		g_print ("loglevel = %i >= %i?", gst_debug_category_get_threshold (dreamrtspserver_debug), GST_LEVEL_DEBUG);
+	{
 		if ( gst_debug_category_get_threshold (dreamrtspserver_debug) >= GST_LEVEL_DEBUG)
 			GST_LOG("no rtsp clients, discard payload!");
 		else
 			g_print (".");
+	}
 	g_mutex_unlock (&s->rtsp_mutex);
 
 	return GST_FLOW_OK;
