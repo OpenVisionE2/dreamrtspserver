@@ -30,6 +30,7 @@ typedef struct {
 	GstRTSPServer *server;
 	GstRTSPMountPoints *mounts;
 	GstRTSPMediaFactory *factory;
+	GstRTSPMedia * rtsp_media;
 	GMutex rtsp_mutex;
 
 	GstElement *pipeline, *aappsink, *vappsink, *aappsrc, *vappsrc;
@@ -69,7 +70,7 @@ static gboolean gst_set_framerate(DreamRTSPserver *s, int value)
 	GstCaps *caps;
 	GstStructure *structure;
 
-	element = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource");
+	element = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource0");
 	if (!element)
 		return FALSE;
 
@@ -99,7 +100,7 @@ static gboolean gst_set_resolution(DreamRTSPserver *s, int width, int height)
 	GstCaps *caps;
 	GstStructure *structure;
 
-	element = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource");
+	element = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource0");
 	if (!element)
 		return FALSE;
 
@@ -189,7 +190,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	}
 	else if (g_strcmp0 (property_name, "audioBitrate") == 0)
 	{
-		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamaudiosource");
+		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamaudiosource0");
 		gint rate = 0;
 		if (source)
 			g_object_get (G_OBJECT (source), "bitrate", &rate, NULL);
@@ -197,7 +198,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	}
 	else if (g_strcmp0 (property_name, "videoBitrate") == 0)
 	{
-		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource");
+		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource0");
 		gint rate = 0;
 		if (source)
 			g_object_get (G_OBJECT (source), "bitrate", &rate, NULL);
@@ -206,7 +207,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	else if (g_strcmp0 (property_name, "width") == 0 || g_strcmp0 (property_name, "height") == 0 || g_strcmp0 (property_name, "framerate") == 0)
 	{
 		guint32 value;
-		if (gst_get_capsprop(s, "dreamvideosource", property_name, &value))
+		if (gst_get_capsprop(s, "dreamvideosource0", property_name, &value))
 			return g_variant_new_int32(value);
 		GST_WARNING("can't handle_get_property name=%s", property_name);
 		return g_variant_new_int32(0);
@@ -232,13 +233,13 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 
 	if (g_strcmp0 (property_name, "audioBitrate") == 0)
 	{
-		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamaudiosource");
+		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamaudiosource0");
 		g_object_set (G_OBJECT (source), "bitrate", g_variant_get_int32 (value), NULL);
 		return 1;
 	}
 	else if (g_strcmp0 (property_name, "videoBitrate") == 0)
 	{
-		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource");
+		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource0");
 		g_object_set (G_OBJECT (source), "bitrate", g_variant_get_int32 (value), NULL);
 		return 1;
 	}
@@ -270,18 +271,26 @@ static void handle_method_call (GDBusConnection       *connection,
 	GST_DEBUG("dbus handle method %s %s from %s", method_name, paramstr, sender);
 	g_free (paramstr);
 
-	// Method one: HelloWorld
 	if (g_strcmp0 (method_name, "setEnabled") == 0)
 	{
 		gboolean val;
 		GVariant *result;
-		g_variant_get (parameters, "(b)", &val);
-		GstState newstate = val ? GST_STATE_PLAYING : GST_STATE_PAUSED;
+		GstState oldstate, newstate;
 
-		if (gst_element_set_state (s->pipeline, newstate) == GST_STATE_CHANGE_FAILURE)
-			result = g_variant_new ("(b)", FALSE);
-		else
-			result = g_variant_new ("(b)", TRUE);
+		g_variant_get (parameters, "(b)", &val);
+		gst_element_get_state (s->pipeline, &oldstate, NULL, 1*GST_SECOND);
+
+		if (val == TRUE)
+			newstate = (oldstate == GST_STATE_PLAYING) ? GST_STATE_PLAYING : GST_STATE_PAUSED;
+
+		else if (val == FALSE)
+			newstate = GST_STATE_READY;
+
+		result = g_variant_new ("(b)", gst_element_set_state (s->pipeline, newstate) == GST_STATE_CHANGE_FAILURE);
+
+		if (oldstate == GST_STATE_PLAYING)
+			gst_rtsp_media_unprepare (s->rtsp_media);
+
 		g_dbus_method_invocation_return_value (invocation, result);
 	}
 	else if (g_strcmp0 (method_name, "setResolution") == 0)
@@ -365,7 +374,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 
 				switch(transition)
 				{
-					case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
+					case GST_STATE_CHANGE_READY_TO_PAUSED:
 					{
 						if (GST_MESSAGE_SRC (message) == GST_OBJECT (s->pipeline))
 						{
@@ -420,7 +429,8 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 {
 	DreamRTSPserver *s = user_data;
-	GST_INFO("media_unprepare");
+	GstStateChangeReturn ret = gst_element_set_state (s->pipeline, GST_STATE_PAUSED);
+	GST_INFO("no more clients -> media unprepared! bringing source pipeline to PAUSED=%i", ret);
 }
 
 static void client_closed (GstRTSPClient * client, gpointer user_data)
@@ -442,14 +452,16 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 {
 	DreamRTSPserver *s = user_data;
 	g_mutex_lock (&s->rtsp_mutex);
-	GST_INFO("media_configure");
 	GstElement *element = gst_rtsp_media_get_element (media);
+	s->rtsp_media = media;
 	s->aappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "aappsrc");
 	s->vappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "vappsrc");
 	g_signal_connect (media, "unprepared", (GCallback) media_unprepare, s);
 	g_object_set (s->aappsrc, "format", GST_FORMAT_TIME, NULL);
 	g_object_set (s->vappsrc, "format", GST_FORMAT_TIME, NULL);
 	s->rtsp_start_pts = s->rtsp_start_dts = GST_CLOCK_TIME_NONE;
+	GstStateChangeReturn ret = gst_element_set_state (s->pipeline, GST_STATE_PLAYING);
+	GST_INFO("media configured! bringing source pipeline to PLAYING=%i", ret);
 	g_mutex_unlock (&s->rtsp_mutex);
 }
 
@@ -536,8 +548,8 @@ int main (int argc, char *argv[])
 	s.clients_count = 0;
 	s.pipeline = gst_pipeline_new (NULL);
 
-	asrc = gst_element_factory_make ("dreamaudiosource", "dreamaudiosource");
-	vsrc = gst_element_factory_make ("dreamvideosource", "dreamvideosource");
+	asrc = gst_element_factory_make ("dreamaudiosource", "dreamaudiosource0");
+	vsrc = gst_element_factory_make ("dreamvideosource", "dreamvideosource0");
 
 	aparse = gst_element_factory_make ("aacparse", NULL);
 	vparse = gst_element_factory_make ("h264parse", NULL);
@@ -621,7 +633,7 @@ int main (int argc, char *argv[])
 	g_signal_connect (G_OBJECT (bus), "message", G_CALLBACK (message_cb), &s);
 	gst_object_unref (GST_OBJECT (bus));
 	
-	gst_element_set_state (s.pipeline, GST_STATE_PAUSED);
+	gst_element_set_state (s.pipeline, GST_STATE_READY);
 
 	g_main_loop_run (s.loop);
 
