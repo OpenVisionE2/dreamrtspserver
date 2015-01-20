@@ -9,3 +9,6 @@ BusName=com.dreambox.RTSPserver
 Restart=on-failure
 ExecStart=/usr/bin/dreamrtspserver
 StandardOutput=null
+
+[Install]
+WantedBy=multi-user.target
