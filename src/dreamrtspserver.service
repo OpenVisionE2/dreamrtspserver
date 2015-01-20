@@ -1,0 +1,11 @@
+[Unit]
+Description=Dreambox Real-Time Streaming Protocol Server
+Requires=dbus.socket
+After=dbus.socket
+
+[Service]
+Type=dbus
+BusName=com.dreambox.RTSPserver
+Restart=on-failure
+ExecStart=/usr/bin/dreamrtspserver
+StandardOutput=null
