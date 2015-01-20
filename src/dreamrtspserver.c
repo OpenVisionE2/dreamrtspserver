@@ -419,16 +419,29 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 {
 	DreamRTSPserver *s = user_data;
+	GST_INFO("media_unprepare");
+}
+
+static void client_closed (GstRTSPClient * client, gpointer user_data)
+{
+	DreamRTSPserver *s = user_data;
 	s->clients_count--;
-	GST_INFO("media_unprepare, clients_count=%i", s->clients_count);
+	GST_INFO("client_closed clients_count=%i", s->clients_count);
+}
+
+static void client_connected (GstRTSPServer * server, GstRTSPClient * client, gpointer user_data)
+{
+	DreamRTSPserver *s = user_data;
+	s->clients_count++;
+	GST_INFO("client_connected %" GST_PTR_FORMAT " clients_count=%i", client, s->clients_count);
+	g_signal_connect (client, "closed", (GCallback) client_closed, s);
 }
 
 static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media, gpointer user_data)
 {
 	DreamRTSPserver *s = user_data;
 	g_mutex_lock (&s->rtsp_mutex);
-	s->clients_count++;
-	GST_INFO("media_configure, clients_count=%i", s->clients_count);
+	GST_INFO("media_configure");
 	GstElement *element = gst_rtsp_media_get_element (media);
 	s->aappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "aappsrc");
 	s->vappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "vappsrc");
@@ -450,7 +463,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		appsrc = GST_APP_SRC(s->aappsrc);
 
 	g_mutex_lock (&s->rtsp_mutex);
-	if (appsrc) {
+	if (appsrc && s->clients_count) {
 		GstSample *sample = gst_app_sink_pull_sample (GST_APP_SINK (appsink));
 		GstBuffer *buffer = gst_sample_get_buffer (sample);
 		GstCaps *caps = gst_sample_get_caps (sample);
@@ -578,6 +591,7 @@ int main (int argc, char *argv[])
 	g_object_unref (s.mounts);
 
 	g_signal_connect (s.factory, "media-configure", (GCallback) media_configure, &s);
+	g_signal_connect (s.server, "client-connected", (GCallback) client_connected, &s);
 
 	gst_rtsp_server_attach (s.server, NULL);
 
