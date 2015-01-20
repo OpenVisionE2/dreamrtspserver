@@ -38,6 +38,7 @@ typedef struct {
 	guint clients_count;
 } DreamRTSPserver;
 
+static const gchar *rtsp_port = "554";
 static const gchar service[] = "com.dreambox.RTSPserver";
 static const gchar object_name[] = "/com/dreambox/RTSPserver";
 static GDBusNodeInfo *introspection_data = NULL;
@@ -368,7 +369,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 					{
 						if (GST_MESSAGE_SRC (message) == GST_OBJECT (s->pipeline))
 						{
-							g_print ("dreambox encoder stream ready at rtsp://127.0.0.1:8554/stream\n");
+							g_print ("dreambox encoder stream ready at rtsp://127.0.0.1:%s/stream\n", rtsp_port);
 						}
 					}	break;
 					default:
@@ -580,12 +581,28 @@ int main (int argc, char *argv[])
 	g_signal_connect (s.vappsink, "new-sample", G_CALLBACK (handover_payload), &s);
 
 	s.server = gst_rtsp_server_new ();
+	gst_rtsp_server_set_service (s.server, rtsp_port);
+
 	s.mounts = gst_rtsp_server_get_mount_points (s.server);
 
 	s.factory = gst_rtsp_media_factory_new ();
 	gst_rtsp_media_factory_set_launch (s.factory, "( appsrc name=vappsrc ! h264parse ! rtph264pay name=pay0 pt=96   appsrc name=aappsrc ! aacparse ! rtpmp4apay name=pay1 pt=97 )");
-
 	gst_rtsp_media_factory_set_shared(s.factory, TRUE);
+
+	if (argc == 3) {
+		gchar *rtsp_user = argv[1];
+		gchar *rtsp_pass = argv[2];
+		GstRTSPToken *token;
+		gchar *basic;
+		GstRTSPAuth *auth = gst_rtsp_auth_new ();
+		gst_rtsp_media_factory_add_role (s.factory, "user", GST_RTSP_PERM_MEDIA_FACTORY_ACCESS, G_TYPE_BOOLEAN, TRUE, GST_RTSP_PERM_MEDIA_FACTORY_CONSTRUCT, G_TYPE_BOOLEAN, TRUE, NULL);
+		token = gst_rtsp_token_new (GST_RTSP_TOKEN_MEDIA_FACTORY_ROLE, G_TYPE_STRING, "user", NULL);
+		basic = gst_rtsp_auth_make_basic (rtsp_user, rtsp_pass);
+		gst_rtsp_server_set_auth (s.server, auth);
+		gst_rtsp_auth_add_basic (auth, basic, token);
+		g_free (basic);
+		gst_rtsp_token_unref (token);
+	}
 
 	gst_rtsp_mount_points_add_factory (s.mounts, "/stream", s.factory);
 	g_object_unref (s.mounts);
