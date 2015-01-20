@@ -150,11 +150,15 @@ static gboolean gst_get_capsprop(DreamRTSPserver *s, const gchar* element_name, 
 	if (g_strcmp0 (prop_name, "framerate") == 0 && value)
 	{
 		const GValue *framerate = gst_structure_get_value (structure, "framerate");
-		*value = gst_value_get_fraction_numerator (framerate);
+		if (GST_VALUE_HOLDS_FRACTION(framerate))
+			*value = gst_value_get_fraction_numerator (framerate);
+		else
+			*value = 0;
 	}
 	else if ((g_strcmp0 (prop_name, "width") == 0 || g_strcmp0 (prop_name, "height") == 0) && value)
 	{
-		gst_structure_get_int (structure, prop_name, value);
+		if (!gst_structure_get_int (structure, prop_name, value))
+			*value = 0;
 	}
 	else
 		return FALSE;
@@ -483,11 +487,11 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 
 		GstBuffer *tmp;
 		tmp = gst_buffer_copy (buffer);
-		GST_LOG("original PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
+		GST_LOG("original PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)), appsrc);
 		if (s->rtsp_start_pts == GST_CLOCK_TIME_NONE) {
 			s->rtsp_start_pts = GST_BUFFER_PTS (tmp);
 			s->rtsp_start_dts = GST_BUFFER_DTS (tmp);
-			GST_INFO("set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
+			GST_INFO("set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)), appsrc);
 		}
 		if (GST_BUFFER_PTS (tmp) < s->rtsp_start_pts)
 			GST_BUFFER_PTS (tmp) = 0;
@@ -599,7 +603,7 @@ int main (int argc, char *argv[])
 
 	s.factory = gst_rtsp_media_factory_new ();
 	gst_rtsp_media_factory_set_launch (s.factory, "( appsrc name=vappsrc ! h264parse ! rtph264pay name=pay0 pt=96   appsrc name=aappsrc ! aacparse ! rtpmp4apay name=pay1 pt=97 )");
-	gst_rtsp_media_factory_set_shared(s.factory, TRUE);
+	gst_rtsp_media_factory_set_shared (s.factory, TRUE);
 
 	if (argc == 3) {
 		gchar *rtsp_user = argv[1];
