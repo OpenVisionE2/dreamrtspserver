@@ -290,7 +290,7 @@ static void handle_method_call (GDBusConnection       *connection,
 		else if (val == FALSE)
 			newstate = GST_STATE_READY;
 
-		result = g_variant_new ("(b)", gst_element_set_state (s->pipeline, newstate) == GST_STATE_CHANGE_FAILURE);
+		result = g_variant_new ("(b)", gst_element_set_state (s->pipeline, newstate) != GST_STATE_CHANGE_FAILURE);
 
 		if (oldstate == GST_STATE_PLAYING)
 			gst_rtsp_media_unprepare (s->rtsp_media);
