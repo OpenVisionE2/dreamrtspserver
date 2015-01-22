@@ -34,7 +34,11 @@ typedef struct {
 	GMutex rtsp_mutex;
 
 	GstElement *pipeline, *aappsink, *vappsink, *aappsrc, *vappsrc;
+	GstElement *asrc, *vsrc, *aq, *vq, *aparse, *vparse;
 	GstClockTime rtsp_start_pts, rtsp_start_dts;
+
+	gchar *rtsp_user;
+	gchar *rtsp_pass;
 
 	guint clients_count;
 } DreamRTSPserver;
@@ -64,56 +68,57 @@ static const gchar introspection_xml[] =
   "  </interface>"
   "</node>";
 
+gboolean create_source_pipeline(DreamRTSPserver *s);
+void create_rtsp_server(DreamRTSPserver *s);
+void destroy_pipeline(DreamRTSPserver *s);
+
 static gboolean gst_set_framerate(DreamRTSPserver *s, int value)
 {
-	GstElement *element;
-	GstCaps *caps;
+	GstCaps *caps = NULL;
 	GstStructure *structure;
+	gboolean ret = FALSE;
 
-	element = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource0");
-	if (!element)
-		return FALSE;
-
-	g_object_get (G_OBJECT (element), "caps", &caps, NULL);
+	g_object_get (G_OBJECT (s->vsrc), "caps", &caps, NULL);
 
 	if (!GST_IS_CAPS(caps))
-		return FALSE;
+		goto out;
 
 	GST_INFO("gst_set_framerate %d old caps %" GST_PTR_FORMAT, value, caps);
 
 	structure = gst_caps_steal_structure (caps, 0);
 	if (!structure)
-		return FALSE;
+		goto out;
 
 	if (value)
 		gst_structure_set (structure, "framerate", GST_TYPE_FRACTION, value, 1, NULL);
 
 	gst_caps_append_structure (caps, structure);
 	GST_INFO("new caps %" GST_PTR_FORMAT, caps);
-	g_object_set (G_OBJECT (element), "caps", caps, NULL);
-	return TRUE;
+	g_object_set (G_OBJECT (s->vsrc), "caps", caps, NULL);
+	ret = TRUE;
+
+out:
+	if (caps)
+		gst_caps_unref(caps);
+	return ret;
 }
 
 static gboolean gst_set_resolution(DreamRTSPserver *s, int width, int height)
 {
-	GstElement *element;
 	GstCaps *caps;
 	GstStructure *structure;
+	gboolean ret = FALSE;
 
-	element = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource0");
-	if (!element)
-		return FALSE;
-
-	g_object_get (G_OBJECT (element), "caps", &caps, NULL);
+	g_object_get (G_OBJECT (s->vsrc), "caps", &caps, NULL);
 
 	if (!GST_IS_CAPS(caps))
-		return FALSE;
+		goto out;
 
 	GST_INFO("old caps %" GST_PTR_FORMAT, caps);
 
 	structure = gst_caps_steal_structure (caps, 0);
 	if (!structure)
-		return FALSE;
+		goto out;
 
 	if (width && height)
 	{
@@ -122,30 +127,36 @@ static gboolean gst_set_resolution(DreamRTSPserver *s, int width, int height)
 	}
 	gst_caps_append_structure (caps, structure);
 	GST_INFO("new caps %" GST_PTR_FORMAT, caps);
-	g_object_set (G_OBJECT (element), "caps", caps, NULL);
-	return TRUE;
+	g_object_set (G_OBJECT (s->vsrc), "caps", caps, NULL);
+	ret = TRUE;
+
+out:
+	if (caps)
+		gst_caps_unref(caps);
+	return ret;
 }
 
 static gboolean gst_get_capsprop(DreamRTSPserver *s, const gchar* element_name, const gchar* prop_name, guint32 *value)
 {
-	GstElement *element;
-	GstCaps *caps;
+	GstElement *element = NULL;
+	GstCaps *caps = NULL;
 	const GstStructure *structure;
+	gboolean ret = FALSE;
 
 	element = gst_bin_get_by_name(GST_BIN(s->pipeline), element_name);
 	if (!element)
-		return FALSE;
+		goto out;
 
 	g_object_get (G_OBJECT (element), "caps", &caps, NULL);
 
 	if (!GST_IS_CAPS(caps))
-		return FALSE;
+		goto out;
 
 	GST_INFO("current caps %" GST_PTR_FORMAT, caps);
 
 	structure = gst_caps_get_structure (caps, 0);
 	if (!structure)
-		return FALSE;
+		goto out;
 
 	if (g_strcmp0 (prop_name, "framerate") == 0 && value)
 	{
@@ -161,22 +172,25 @@ static gboolean gst_get_capsprop(DreamRTSPserver *s, const gchar* element_name, 
 			*value = 0;
 	}
 	else
-		return FALSE;
-
-	gst_caps_unref(caps);
+		goto out;
 
 	GST_INFO("%s.%s = %i", element_name, prop_name, *value);
-
-	return TRUE;
+	ret = TRUE;
+out:
+	if (element)
+		gst_object_unref(element);
+	if (caps)
+		gst_caps_unref(caps);
+	return ret;
 }
 
 static GVariant *handle_get_property (GDBusConnection  *connection,
-		const gchar      *sender,
-		const gchar      *object_path,
-		const gchar      *interface_name,
-		const gchar      *property_name,
-		GError          **error,
-		gpointer          user_data)
+				      const gchar      *sender,
+				      const gchar      *object_path,
+				      const gchar      *interface_name,
+				      const gchar      *property_name,
+				      GError          **error,
+				      gpointer          user_data)
 {
 	DreamRTSPserver *s = user_data;
 
@@ -185,8 +199,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	if (g_strcmp0 (property_name, "state") == 0)
 	{
 		GstState state;
-		gst_element_get_state (s->pipeline, &state, NULL, 1*GST_SECOND);
-		return g_variant_new_boolean (state == GST_STATE_PLAYING);
+		return g_variant_new_boolean ( !!s->pipeline  );
 	}
 	else if (g_strcmp0 (property_name, "clients") == 0)
 	{
@@ -194,18 +207,16 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	}
 	else if (g_strcmp0 (property_name, "audioBitrate") == 0)
 	{
-		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamaudiosource0");
 		gint rate = 0;
-		if (source)
-			g_object_get (G_OBJECT (source), "bitrate", &rate, NULL);
+		if (s->asrc)
+			g_object_get (G_OBJECT (s->asrc), "bitrate", &rate, NULL);
 		return g_variant_new_int32 (rate);
 	}
 	else if (g_strcmp0 (property_name, "videoBitrate") == 0)
 	{
-		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource0");
 		gint rate = 0;
-		if (source)
-			g_object_get (G_OBJECT (source), "bitrate", &rate, NULL);
+		if (s->vsrc)
+			g_object_get (G_OBJECT (s->vsrc), "bitrate", &rate, NULL);
 		return g_variant_new_int32 (rate);
 	}
 	else if (g_strcmp0 (property_name, "width") == 0 || g_strcmp0 (property_name, "height") == 0 || g_strcmp0 (property_name, "framerate") == 0)
@@ -216,18 +227,18 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 		GST_WARNING("can't handle_get_property name=%s", property_name);
 		return g_variant_new_int32(0);
 	}
-	g_set_error (error, G_IO_ERROR,	G_IO_ERROR_FAILED, "[RTSPserver] Invalid property '%s'", property_name);
+	g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] Invalid property '%s'", property_name);
 	return NULL;
 } // handle_get_property
 
 static gboolean handle_set_property (GDBusConnection  *connection,
-		     const gchar      *sender,
-		     const gchar      *object_path,
-		     const gchar      *interface_name,
-		     const gchar      *property_name,
-		     GVariant         *value,
-		     GError          **error,
-		     gpointer          user_data)
+				     const gchar      *sender,
+				     const gchar      *object_path,
+				     const gchar      *interface_name,
+				     const gchar      *property_name,
+				     GVariant         *value,
+				     GError          **error,
+				     gpointer          user_data)
 {
 	DreamRTSPserver *s = user_data;
 
@@ -238,14 +249,19 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 	if (g_strcmp0 (property_name, "audioBitrate") == 0)
 	{
 		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamaudiosource0");
-		g_object_set (G_OBJECT (source), "bitrate", g_variant_get_int32 (value), NULL);
-		return 1;
+		if (s->asrc)
+		{
+			g_object_set (G_OBJECT (s->asrc), "bitrate", g_variant_get_int32 (value), NULL);
+			return 1;
+		}
 	}
 	else if (g_strcmp0 (property_name, "videoBitrate") == 0)
 	{
-		GstElement *source = gst_bin_get_by_name(GST_BIN(s->pipeline), "dreamvideosource0");
-		g_object_set (G_OBJECT (source), "bitrate", g_variant_get_int32 (value), NULL);
-		return 1;
+		if (s->vsrc)
+		{
+			g_object_set (G_OBJECT (s->vsrc), "bitrate", g_variant_get_int32 (value), NULL);
+			return 1;
+		}
 	}
 	else if (g_strcmp0 (property_name, "framerate") == 0)
 	{
@@ -261,13 +277,13 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 } // handle_set_property
 
 static void handle_method_call (GDBusConnection       *connection,
-		const gchar           *sender,
-		const gchar           *object_path,
-		const gchar           *interface_name,
-		const gchar           *method_name,
-		GVariant              *parameters,
-		GDBusMethodInvocation *invocation,
-		gpointer               user_data)
+				const gchar           *sender,
+				const gchar           *object_path,
+				const gchar           *interface_name,
+				const gchar           *method_name,
+				GVariant              *parameters,
+				GDBusMethodInvocation *invocation,
+				gpointer               user_data)
 {
 	DreamRTSPserver *s = user_data;
 
@@ -278,30 +294,29 @@ static void handle_method_call (GDBusConnection       *connection,
 	if (g_strcmp0 (method_name, "setEnabled") == 0)
 	{
 		gboolean val;
-		GVariant *result;
+		gboolean result = FALSE;
 		GstState oldstate, newstate;
 
 		g_variant_get (parameters, "(b)", &val);
-		gst_element_get_state (s->pipeline, &oldstate, NULL, 1*GST_SECOND);
+		GST_DEBUG("s->pipeline=%p, val=%i",s->pipeline, val);
 
-		if (val == TRUE)
-			newstate = (oldstate == GST_STATE_PLAYING) ? GST_STATE_PLAYING : GST_STATE_PAUSED;
-
-		else if (val == FALSE)
-			newstate = GST_STATE_READY;
-
-		result = g_variant_new ("(b)", gst_element_set_state (s->pipeline, newstate) != GST_STATE_CHANGE_FAILURE);
-
-		if (oldstate == GST_STATE_PLAYING)
-			gst_rtsp_media_unprepare (s->rtsp_media);
-
-		g_dbus_method_invocation_return_value (invocation, result);
+		if (!s->pipeline && val == TRUE)
+		{
+			result = create_source_pipeline(s);
+		}
+		else if (s->pipeline && val == FALSE)
+		{
+			if (s->rtsp_media)
+				gst_rtsp_media_unprepare (s->rtsp_media);
+			destroy_pipeline(s);
+			result = TRUE;
+		}
+		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
 	}
 	else if (g_strcmp0 (method_name, "setResolution") == 0)
 	{
 		int width, height;
 		g_variant_get (parameters, "(ii)", &width, &height);
-
 		if (gst_set_resolution(s, width, height))
 			g_dbus_method_invocation_return_value (invocation, NULL);
 		else
@@ -315,8 +330,8 @@ static void handle_method_call (GDBusConnection       *connection,
 } // handle_method_call
 
 static void on_bus_acquired (GDBusConnection *connection,
-		const gchar     *name,
-		gpointer        user_data)
+			     const gchar     *name,
+			     gpointer        user_data)
 {
 	static GDBusInterfaceVTable interface_vtable =
 	{
@@ -332,30 +347,29 @@ static void on_bus_acquired (GDBusConnection *connection,
 
 	registration_id =
 	g_dbus_connection_register_object (connection,
-				object_name,
-				introspection_data->interfaces[0],
-				&interface_vtable,
-				user_data,    // Optional user data
-				NULL,    // Func. for freeing user data
-				&error);
-
+					   object_name,
+				    introspection_data->interfaces[0],
+				    &interface_vtable,
+				    user_data,    // Optional user data
+				    NULL,    // Func. for freeing user data
+				    &error);
 } // on_bus_acquired
 
 static void on_name_acquired (GDBusConnection *connection,
-		const gchar     *name,
-		gpointer         user_data)
+			      const gchar     *name,
+			      gpointer         user_data)
 {
 	GST_DEBUG ("aquired dbus name (\"%s\")", name);
 } // on_name_acquired
 
 static void on_name_lost (GDBusConnection *connection,
-	const gchar     *name,
-	gpointer         user_data)
+			  const gchar     *name,
+			  gpointer         user_data)
 {
 	DreamRTSPserver *s = user_data;
 
 	GST_WARNING ("lost dbus name (\"%s\" @ %p)", name, connection);
-// 	g_main_loop_quit (s->loop);
+	//  g_main_loop_quit (s->loop);
 } // on_name_lost
 
 static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_data)
@@ -372,7 +386,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 
 			if (GST_MESSAGE_SRC(message) == GST_OBJECT(s->pipeline))
 			{
-				GST_INFO("state transition %s -> %s", gst_element_state_get_name(old_state), gst_element_state_get_name(new_state));
+				GST_INFO_OBJECT(s, "state transition %s -> %s", gst_element_state_get_name(old_state), gst_element_state_get_name(new_state));
 
 				GstStateChange transition = (GstStateChange)GST_STATE_TRANSITION(old_state, new_state);
 
@@ -435,6 +449,7 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	DreamRTSPserver *s = user_data;
 	GstStateChangeReturn ret = gst_element_set_state (s->pipeline, GST_STATE_PAUSED);
 	GST_INFO("no more clients -> media unprepared! bringing source pipeline to PAUSED=%i", ret);
+	s->rtsp_media = NULL;
 }
 
 static void client_closed (GstRTSPClient * client, gpointer user_data)
@@ -456,10 +471,11 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 {
 	DreamRTSPserver *s = user_data;
 	g_mutex_lock (&s->rtsp_mutex);
-	GstElement *element = gst_rtsp_media_get_element (media);
 	s->rtsp_media = media;
+	GstElement *element = gst_rtsp_media_get_element (media);
 	s->aappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "aappsrc");
 	s->vappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "vappsrc");
+	gst_object_unref(element);
 	g_signal_connect (media, "unprepared", (GCallback) media_unprepare, s);
 	g_object_set (s->aappsrc, "format", GST_FORMAT_TIME, NULL);
 	g_object_set (s->vappsrc, "format", GST_FORMAT_TIME, NULL);
@@ -498,7 +514,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		else
 			GST_BUFFER_PTS (tmp) -= s->rtsp_start_pts;
 		GST_BUFFER_DTS (tmp) -= s->rtsp_start_dts;
-// 		GST_LOG("new PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
+		//    GST_LOG("new PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
 
 		GstCaps *oldcaps = gst_app_src_get_caps (appsrc);
 		if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
@@ -506,7 +522,6 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 			GST_LOG("CAPS changed! %" GST_PTR_FORMAT " to %" GST_PTR_FORMAT, oldcaps, caps);
 			gst_app_src_set_caps (appsrc, caps);
 		}
-
 		gst_app_src_push_buffer (appsrc, tmp);
 		gst_sample_unref (sample);
 	}
@@ -522,47 +537,23 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 	return GST_FLOW_OK;
 }
 
-int main (int argc, char *argv[])
+gboolean create_source_pipeline(DreamRTSPserver *s)
 {
-	DreamRTSPserver s;
-	GstBus *bus;
-	guint owner_id;
+	GST_INFO_OBJECT(s, "create_source_pipeline");
 
-	memset (&s, 0, sizeof(s));
+	s->pipeline = gst_pipeline_new (NULL);
 
-	introspection_data = g_dbus_node_info_new_for_xml (introspection_xml, NULL);
+	s->asrc = gst_element_factory_make ("dreamaudiosource", "dreamaudiosource0");
+	s->vsrc = gst_element_factory_make ("dreamvideosource", "dreamvideosource0");
 
-	owner_id = g_bus_own_name (G_BUS_TYPE_SYSTEM,
-		service,
-		G_BUS_NAME_OWNER_FLAGS_NONE,
-		on_bus_acquired,
-		on_name_acquired,
-		on_name_lost,
-		&s,
-		NULL);
+	s->aparse = gst_element_factory_make ("aacparse", NULL);
+	s->vparse = gst_element_factory_make ("h264parse", NULL);
 
-	gst_init (0, NULL);
+	s->aq = gst_element_factory_make ("queue", NULL);
+	s->vq = gst_element_factory_make ("queue", NULL);
 
-	GST_DEBUG_CATEGORY_INIT (dreamrtspserver_debug, "dreamrtspserver",
-		GST_DEBUG_BOLD | GST_DEBUG_FG_YELLOW | GST_DEBUG_BG_BLUE,
-		"Dreambox RTSP server daemon");
-
-	GstElement *asrc, *vsrc, *aq, *vq, *aparse, *vparse;
-
-	s.clients_count = 0;
-	s.pipeline = gst_pipeline_new (NULL);
-
-	asrc = gst_element_factory_make ("dreamaudiosource", "dreamaudiosource0");
-	vsrc = gst_element_factory_make ("dreamvideosource", "dreamvideosource0");
-
-	aparse = gst_element_factory_make ("aacparse", NULL);
-	vparse = gst_element_factory_make ("h264parse", NULL);
-
-	aq = gst_element_factory_make ("queue", NULL);
-	vq = gst_element_factory_make ("queue", NULL);
-
-	s.aappsink = gst_element_factory_make ("appsink", "aappsink");
-	s.vappsink = gst_element_factory_make ("appsink", "vappsink");
+	s->aappsink = gst_element_factory_make ("appsink", "aappsink");
+	s->vappsink = gst_element_factory_make ("appsink", "vappsink");
 
 	GstElement *appsrc, *vpay, *apay, *udpsrc;
 	appsrc = gst_element_factory_make ("appsrc", NULL);
@@ -570,10 +561,10 @@ int main (int argc, char *argv[])
 	apay = gst_element_factory_make ("rtpmp4apay", NULL);
 	udpsrc = gst_element_factory_make ("udpsrc", NULL);
 
-	if (!asrc || !vsrc || !aparse || !vparse || !aq || !vq || !s.aappsink || !s.vappsink || !appsrc || !vpay || !apay || !udpsrc)
+	if (!(s->asrc && s->vsrc && s->aparse && s->vparse && s->aq && s->vq && s->aappsink && s->vappsink && appsrc && vpay && apay && udpsrc))
 	{
-		g_error ("Failed to create element(s):%s%s%s%s%s%s%s%s%s%s%s%s", asrc?"":" dreamaudiosource", vsrc?"":" dreamvideosource", aparse?"":" aacparse", vparse?"":" h264parse", aq?"":" aqueue",
-			vq?"":" vqueue", s.aappsink?"":" aappsink", s.vappsink?"":" vappsink", appsrc?"":" appsrc", vpay?"": "rtph264pay", apay?"":" rtpmp4apay", udpsrc?"":" udpsrc" );
+		g_error ("Failed to create element(s):%s%s%s%s%s%s%s%s%s%s%s%s", s->asrc?"":" dreamaudiosource", s->vsrc?"":" dreamvideosource", s->aparse?"":" aacparse", s->vparse?"":" h264parse", s->aq?"":" aqueue",
+			 s->vq?"":" vqueue", s->aappsink?"":" aappsink", s->vappsink?"":" vappsink", appsrc?"":" appsrc", vpay?"": "rtph264pay", apay?"":" rtpmp4apay", udpsrc?"":" udpsrc" );
 	}
 	else
 	{
@@ -583,68 +574,121 @@ int main (int argc, char *argv[])
 		gst_object_unref (udpsrc);
 	}
 
-	gst_bin_add_many (GST_BIN (s.pipeline), asrc, vsrc, aparse, vparse, aq, vq, s.aappsink, s.vappsink, NULL);
-	gst_element_link_many (asrc, aparse, aq, s.aappsink, NULL);
-	gst_element_link_many (vsrc, vparse, vq, s.vappsink, NULL);
+	gst_bin_add_many (GST_BIN (s->pipeline), s->asrc, s->vsrc, s->aparse, s->vparse, s->aq, s->vq, s->aappsink, s->vappsink, NULL);
+	gst_element_link_many (s->asrc, s->aparse, s->aq, s->aappsink, NULL);
+	gst_element_link_many (s->vsrc, s->vparse, s->vq, s->vappsink, NULL);
 
-	g_object_set (G_OBJECT (aq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
-	g_object_set (G_OBJECT (vq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+	g_object_set (G_OBJECT (s->aq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+	g_object_set (G_OBJECT (s->vq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 
-	g_object_set (G_OBJECT (s.aappsink), "emit-signals", TRUE, NULL);
-	g_signal_connect (s.aappsink, "new-sample", G_CALLBACK (handover_payload), &s);
+	g_object_set (G_OBJECT (s->aappsink), "emit-signals", TRUE, NULL);
+	g_object_set (G_OBJECT (s->aappsink), "enable-last-sample", FALSE, NULL);
+	//  g_object_set (G_OBJECT (s->aappsink), "sync", FALSE, NULL);
+	g_signal_connect (s->aappsink, "new-sample", G_CALLBACK (handover_payload), s);
 
-	g_object_set (G_OBJECT (s.vappsink), "emit-signals", TRUE, NULL);
-	g_signal_connect (s.vappsink, "new-sample", G_CALLBACK (handover_payload), &s);
+	g_object_set (G_OBJECT (s->vappsink), "emit-signals", TRUE, NULL);
+	g_object_set (G_OBJECT (s->vappsink), "enable-last-sample", FALSE, NULL);
+	//  g_object_set (G_OBJECT (s->vappsink), "sync", FALSE, NULL);
+	g_signal_connect (s->vappsink, "new-sample", G_CALLBACK (handover_payload), s);
 
-	s.server = gst_rtsp_server_new ();
-	gst_rtsp_server_set_service (s.server, rtsp_port);
+	GstBus *bus = gst_pipeline_get_bus (GST_PIPELINE (s->pipeline));
+	gst_bus_add_signal_watch (bus);
+	g_signal_connect (G_OBJECT (bus), "message", G_CALLBACK (message_cb), s);
+	gst_object_unref (GST_OBJECT (bus));
 
-	s.mounts = gst_rtsp_server_get_mount_points (s.server);
+	return gst_element_set_state (s->pipeline, GST_STATE_PAUSED) != GST_STATE_CHANGE_FAILURE;
+}
 
-	s.factory = gst_rtsp_media_factory_new ();
-	gst_rtsp_media_factory_set_launch (s.factory, "( appsrc name=vappsrc ! h264parse ! rtph264pay name=pay0 pt=96   appsrc name=aappsrc ! aacparse ! rtpmp4apay name=pay1 pt=97 )");
-	gst_rtsp_media_factory_set_shared (s.factory, TRUE);
+void create_rtsp_server(DreamRTSPserver *s)
+{
+	GST_INFO_OBJECT(s, "create_rtsp_server");
 
-	if (argc == 3) {
-		gchar *rtsp_user = argv[1];
-		gchar *rtsp_pass = argv[2];
+	s->server = gst_rtsp_server_new ();
+	gst_rtsp_server_set_service (s->server, rtsp_port);
+
+	s->mounts = gst_rtsp_server_get_mount_points (s->server);
+
+	s->factory = gst_rtsp_media_factory_new ();
+	gst_rtsp_media_factory_set_launch (s->factory, "( appsrc name=vappsrc ! h264parse ! rtph264pay name=pay0 pt=96   appsrc name=aappsrc ! aacparse ! rtpmp4apay name=pay1 pt=97 )");
+	gst_rtsp_media_factory_set_shared (s->factory, TRUE);
+
+	if (s->rtsp_user) {
 		GstRTSPToken *token;
 		gchar *basic;
 		GstRTSPAuth *auth = gst_rtsp_auth_new ();
-		gst_rtsp_media_factory_add_role (s.factory, "user", GST_RTSP_PERM_MEDIA_FACTORY_ACCESS, G_TYPE_BOOLEAN, TRUE, GST_RTSP_PERM_MEDIA_FACTORY_CONSTRUCT, G_TYPE_BOOLEAN, TRUE, NULL);
+		gst_rtsp_media_factory_add_role (s->factory, "user", GST_RTSP_PERM_MEDIA_FACTORY_ACCESS, G_TYPE_BOOLEAN, TRUE, GST_RTSP_PERM_MEDIA_FACTORY_CONSTRUCT, G_TYPE_BOOLEAN, TRUE, NULL);
 		token = gst_rtsp_token_new (GST_RTSP_TOKEN_MEDIA_FACTORY_ROLE, G_TYPE_STRING, "user", NULL);
-		basic = gst_rtsp_auth_make_basic (rtsp_user, rtsp_pass);
-		gst_rtsp_server_set_auth (s.server, auth);
+		basic = gst_rtsp_auth_make_basic (s->rtsp_user, s->rtsp_pass);
+		gst_rtsp_server_set_auth (s->server, auth);
 		gst_rtsp_auth_add_basic (auth, basic, token);
 		g_free (basic);
 		gst_rtsp_token_unref (token);
 	}
 
-	gst_rtsp_mount_points_add_factory (s.mounts, "/stream", s.factory);
-	g_object_unref (s.mounts);
+	gst_rtsp_mount_points_add_factory (s->mounts, "/stream", s->factory);
+	g_object_unref (s->mounts);
 
-	g_signal_connect (s.factory, "media-configure", (GCallback) media_configure, &s);
-	g_signal_connect (s.server, "client-connected", (GCallback) client_connected, &s);
+	g_signal_connect (s->factory, "media-configure", (GCallback) media_configure, s);
+	g_signal_connect (s->server, "client-connected", (GCallback) client_connected, s);
 
-	gst_rtsp_server_attach (s.server, NULL);
+	gst_rtsp_server_attach (s->server, NULL);
+
+	s->clients_count = 0;
+	s->rtsp_media = NULL;
+}
+
+void destroy_pipeline(DreamRTSPserver *s)
+{
+	GST_INFO_OBJECT(s, "destroy_pipeline");
+	gst_element_set_state (s->pipeline, GST_STATE_NULL);
+	gst_object_unref (s->pipeline);
+	s->pipeline = NULL;
+}
+
+int main (int argc, char *argv[])
+{
+	DreamRTSPserver s;
+	guint owner_id;
+
+	memset (&s, 0, sizeof(s));
+
+	s.pipeline = NULL;
+
+	introspection_data = g_dbus_node_info_new_for_xml (introspection_xml, NULL);
+
+	owner_id = g_bus_own_name (G_BUS_TYPE_SYSTEM,
+				   service,
+			    G_BUS_NAME_OWNER_FLAGS_NONE,
+			    on_bus_acquired,
+			    on_name_acquired,
+			    on_name_lost,
+			    &s,
+			    NULL);
+
+	if (argc == 3) {
+		s.rtsp_user = argv[1];
+		s.rtsp_pass = argv[2];
+	}
+	else
+		s.rtsp_user = NULL;
+
+	gst_init (0, NULL);
+
+	GST_DEBUG_CATEGORY_INIT (dreamrtspserver_debug, "dreamrtspserver",
+				 GST_DEBUG_BOLD | GST_DEBUG_FG_YELLOW | GST_DEBUG_BG_BLUE,
+			  "Dreambox RTSP server daemon");
 
 	g_mutex_init (&s.rtsp_mutex);
 
-	s.loop = g_main_loop_new (NULL, FALSE);
+	create_rtsp_server(&s);
 
-	bus = gst_pipeline_get_bus (GST_PIPELINE (s.pipeline));
-	gst_bus_add_signal_watch (bus);
-	g_signal_connect (G_OBJECT (bus), "message", G_CALLBACK (message_cb), &s);
-	gst_object_unref (GST_OBJECT (bus));
-	
-	gst_element_set_state (s.pipeline, GST_STATE_READY);
+	s.loop = g_main_loop_new (NULL, FALSE);
 
 	g_main_loop_run (s.loop);
 
-	gst_element_set_state (s.pipeline, GST_STATE_NULL);
+	destroy_pipeline(&s);
 
 	g_main_loop_unref (s.loop);
-	gst_object_unref (s.pipeline);
 
 	g_mutex_clear (&s.rtsp_mutex);
 
