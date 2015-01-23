@@ -40,7 +40,7 @@ typedef struct {
 	gchar *rtsp_user;
 	gchar *rtsp_pass;
 
-	guint clients_count;
+	GList *clients_list;
 } DreamRTSPserver;
 
 static const gchar *rtsp_port = "554";
@@ -71,6 +71,7 @@ static const gchar introspection_xml[] =
 gboolean create_source_pipeline(DreamRTSPserver *s);
 void create_rtsp_server(DreamRTSPserver *s);
 void destroy_pipeline(DreamRTSPserver *s);
+void disconnect_rtspserver(DreamRTSPserver *s);
 
 static gboolean gst_set_framerate(DreamRTSPserver *s, int value)
 {
@@ -203,7 +204,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	}
 	else if (g_strcmp0 (property_name, "clients") == 0)
 	{
-		return g_variant_new_int32 (s->clients_count);
+		return g_variant_new_int32 (g_list_length(s->clients_list));
 	}
 	else if (g_strcmp0 (property_name, "audioBitrate") == 0)
 	{
@@ -306,8 +307,7 @@ static void handle_method_call (GDBusConnection       *connection,
 		}
 		else if (s->pipeline && val == FALSE)
 		{
-			if (s->rtsp_media)
-				gst_rtsp_media_unprepare (s->rtsp_media);
+			disconnect_rtspserver(s);
 			destroy_pipeline(s);
 			result = TRUE;
 		}
@@ -448,6 +448,7 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 {
 	DreamRTSPserver *s = user_data;
 	GstStateChangeReturn ret = gst_element_set_state (s->pipeline, GST_STATE_PAUSED);
+
 	GST_INFO("no more clients -> media unprepared! bringing source pipeline to PAUSED=%i", ret);
 	s->rtsp_media = NULL;
 }
@@ -455,15 +456,16 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 static void client_closed (GstRTSPClient * client, gpointer user_data)
 {
 	DreamRTSPserver *s = user_data;
-	s->clients_count--;
-	GST_INFO("client_closed clients_count=%i", s->clients_count);
+	s->clients_list = g_list_remove(g_list_first (s->clients_list), client);
+	GST_INFO("client_closed  (number of clients: %i)", g_list_length(s->clients_list));
 }
 
 static void client_connected (GstRTSPServer * server, GstRTSPClient * client, gpointer user_data)
 {
 	DreamRTSPserver *s = user_data;
-	s->clients_count++;
-	GST_INFO("client_connected %" GST_PTR_FORMAT " clients_count=%i", client, s->clients_count);
+	s->clients_list = g_list_append(s->clients_list, client);
+	const gchar *ip = gst_rtsp_connection_get_ip (gst_rtsp_client_get_connection (client));
+	GST_INFO("client_connected %" GST_PTR_FORMAT " from %s  (number of clients: %i)", client, ip, g_list_length(s->clients_list));
 	g_signal_connect (client, "closed", (GCallback) client_closed, s);
 }
 
@@ -496,7 +498,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		appsrc = GST_APP_SRC(s->aappsrc);
 
 	g_mutex_lock (&s->rtsp_mutex);
-	if (appsrc && s->clients_count) {
+	if (appsrc && g_list_length(s->clients_list) > 0) {
 		GstSample *sample = gst_app_sink_pull_sample (GST_APP_SINK (appsink));
 		GstBuffer *buffer = gst_sample_get_buffer (sample);
 		GstCaps *caps = gst_sample_get_caps (sample);
@@ -633,8 +635,30 @@ void create_rtsp_server(DreamRTSPserver *s)
 
 	gst_rtsp_server_attach (s->server, NULL);
 
-	s->clients_count = 0;
+	s->clients_list = NULL;
 	s->rtsp_media = NULL;
+}
+
+void disconnect_rtspserver(DreamRTSPserver *s)
+{
+	if (s->rtsp_media)
+	{
+		GList *walk;
+		for (walk = s->clients_list; walk; walk = g_list_next (walk))
+		{
+			GstRTSPClient * client = (GstRTSPClient *) walk->data;
+			GList *walk2;
+			for (walk2 = client->sessions; walk2; walk2 = g_list_next (walk2))
+			{
+				GstRTSPSession *session = (GstRTSPSession *) walk2->data;
+				GstRTSPSessionMedia *media = gst_rtsp_session_get_media (session, client->uri);
+				gst_rtsp_session_release_media (session, media);
+			}
+			gst_rtsp_connection_close (gst_rtsp_client_get_connection (client));
+			GST_INFO("disconnect_rtspserver forced disconnect %" GST_PTR_FORMAT "", client);
+		}
+		gst_rtsp_media_unprepare (s->rtsp_media);
+	}
 }
 
 void destroy_pipeline(DreamRTSPserver *s)
@@ -691,6 +715,8 @@ int main (int argc, char *argv[])
 	g_main_loop_unref (s.loop);
 
 	g_mutex_clear (&s.rtsp_mutex);
+
+	g_list_free (s.clients_list);
 
 	g_bus_unown_name (owner_id);
 	g_dbus_node_info_unref (introspection_data);
