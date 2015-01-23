@@ -647,13 +647,6 @@ void disconnect_rtspserver(DreamRTSPserver *s)
 		for (walk = s->clients_list; walk; walk = g_list_next (walk))
 		{
 			GstRTSPClient * client = (GstRTSPClient *) walk->data;
-			GList *walk2;
-			for (walk2 = client->sessions; walk2; walk2 = g_list_next (walk2))
-			{
-				GstRTSPSession *session = (GstRTSPSession *) walk2->data;
-				GstRTSPSessionMedia *media = gst_rtsp_session_get_media (session, client->uri);
-				gst_rtsp_session_release_media (session, media);
-			}
 			gst_rtsp_connection_close (gst_rtsp_client_get_connection (client));
 			GST_INFO("disconnect_rtspserver forced disconnect %" GST_PTR_FORMAT "", client);
 		}
