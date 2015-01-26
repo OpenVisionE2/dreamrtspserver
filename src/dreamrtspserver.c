@@ -27,7 +27,7 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 
 typedef struct {
 	GMainLoop *loop;
-	GstRTSPServer *server;
+	GstRTSPServer *rtsp_server;
 	GstRTSPMountPoints *mounts;
 	GstRTSPMediaFactory *factory;
 	GstRTSPMedia * rtsp_media;
@@ -69,9 +69,9 @@ static const gchar introspection_xml[] =
   "</node>";
 
 gboolean create_source_pipeline(DreamRTSPserver *s);
-void create_rtsp_server(DreamRTSPserver *s);
+void enable_rtsp_server(DreamRTSPserver *s);
+void disable_rtsp_server(DreamRTSPserver *s);
 void destroy_pipeline(DreamRTSPserver *s);
-void disconnect_rtspserver(DreamRTSPserver *s);
 
 static gboolean gst_set_framerate(DreamRTSPserver *s, int value)
 {
@@ -304,10 +304,12 @@ static void handle_method_call (GDBusConnection       *connection,
 		if (!s->pipeline && val == TRUE)
 		{
 			result = create_source_pipeline(s);
+			if (result)
+				enable_rtsp_server(s);
 		}
 		else if (s->pipeline && val == FALSE)
 		{
-			disconnect_rtspserver(s);
+			disable_rtsp_server(s);
 			destroy_pipeline(s);
 			result = TRUE;
 		}
@@ -605,10 +607,10 @@ void create_rtsp_server(DreamRTSPserver *s)
 {
 	GST_INFO_OBJECT(s, "create_rtsp_server");
 
-	s->server = gst_rtsp_server_new ();
-	gst_rtsp_server_set_service (s->server, rtsp_port);
-
-	s->mounts = gst_rtsp_server_get_mount_points (s->server);
+	s->rtsp_server = gst_rtsp_server_new ();
+	gst_rtsp_server_set_service (s->rtsp_server, rtsp_port);
+	g_signal_connect (s->rtsp_server, "client-connected", (GCallback) client_connected, s);
+	gst_rtsp_server_attach (s->rtsp_server, NULL);
 
 	s->factory = gst_rtsp_media_factory_new ();
 	gst_rtsp_media_factory_set_launch (s->factory, "( appsrc name=vappsrc ! h264parse ! rtph264pay name=pay0 pt=96   appsrc name=aappsrc ! aacparse ! rtpmp4apay name=pay1 pt=97 )");
@@ -621,37 +623,40 @@ void create_rtsp_server(DreamRTSPserver *s)
 		gst_rtsp_media_factory_add_role (s->factory, "user", GST_RTSP_PERM_MEDIA_FACTORY_ACCESS, G_TYPE_BOOLEAN, TRUE, GST_RTSP_PERM_MEDIA_FACTORY_CONSTRUCT, G_TYPE_BOOLEAN, TRUE, NULL);
 		token = gst_rtsp_token_new (GST_RTSP_TOKEN_MEDIA_FACTORY_ROLE, G_TYPE_STRING, "user", NULL);
 		basic = gst_rtsp_auth_make_basic (s->rtsp_user, s->rtsp_pass);
-		gst_rtsp_server_set_auth (s->server, auth);
+		gst_rtsp_server_set_auth (s->rtsp_server, auth);
 		gst_rtsp_auth_add_basic (auth, basic, token);
 		g_free (basic);
 		gst_rtsp_token_unref (token);
 	}
 
-	gst_rtsp_mount_points_add_factory (s->mounts, "/stream", s->factory);
-	g_object_unref (s->mounts);
-
 	g_signal_connect (s->factory, "media-configure", (GCallback) media_configure, s);
-	g_signal_connect (s->server, "client-connected", (GCallback) client_connected, s);
+}
 
-	gst_rtsp_server_attach (s->server, NULL);
-
+void enable_rtsp_server(DreamRTSPserver *s)
+{
+	GST_INFO_OBJECT(s, "enable_rtsp_server");
+	s->mounts = gst_rtsp_server_get_mount_points (s->rtsp_server);
+	gst_rtsp_mount_points_add_factory (s->mounts, "/stream", g_object_ref(s->factory));
+	g_object_unref (s->mounts);
 	s->clients_list = NULL;
 	s->rtsp_media = NULL;
 }
 
-void disconnect_rtspserver(DreamRTSPserver *s)
+GstRTSPFilterResult *client_filter_func (GstRTSPServer *server, GstRTSPClient *client, gpointer user_data)
 {
+	DreamRTSPserver *s = user_data;
+	GST_INFO("client_filter_func %" GST_PTR_FORMAT "  (number of clients: %i)", client, g_list_length(s->clients_list));
+	return GST_RTSP_FILTER_REMOVE;
+}
+
+void disable_rtsp_server(DreamRTSPserver *s)
+{
+	GST_INFO("disconnect_rtspserver");
 	if (s->rtsp_media)
 	{
-		GList *walk;
-		for (walk = s->clients_list; walk; walk = g_list_next (walk))
-		{
-			GstRTSPClient * client = (GstRTSPClient *) walk->data;
-			gst_rtsp_connection_close (gst_rtsp_client_get_connection (client));
-			GST_INFO("disconnect_rtspserver forced disconnect %" GST_PTR_FORMAT "", client);
-		}
-		gst_rtsp_media_unprepare (s->rtsp_media);
+		GList *filter = gst_rtsp_server_client_filter(s->rtsp_server, (GstRTSPServerClientFilterFunc) client_filter_func, s);
 	}
+	gst_rtsp_mount_points_remove_factory (s->mounts, "/stream");
 }
 
 void destroy_pipeline(DreamRTSPserver *s)
