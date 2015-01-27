@@ -44,9 +44,11 @@ typedef struct {
 } DreamRTSPserver;
 
 static const gchar *rtsp_port = "554";
+static const gchar *rtsp_path = "/stream";
 static const gchar service[] = "com.dreambox.RTSPserver";
 static const gchar object_name[] = "/com/dreambox/RTSPserver";
 static GDBusNodeInfo *introspection_data = NULL;
+
 static const gchar introspection_xml[] =
   "<node>"
   "  <interface name='com.dreambox.RTSPserver'>"
@@ -65,6 +67,7 @@ static const gchar introspection_xml[] =
   "    <property type='i' name='framerate' access='readwrite'/>"
   "    <property type='i' name='width' access='read'/>"
   "    <property type='i' name='height' access='read'/>"
+  "    <property type='s' name='path' access='read'/>"
   "  </interface>"
   "</node>";
 
@@ -227,6 +230,10 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 			return g_variant_new_int32(value);
 		GST_WARNING("can't handle_get_property name=%s", property_name);
 		return g_variant_new_int32(0);
+	}
+	else if (g_strcmp0 (property_name, "path") == 0)
+	{
+		return g_variant_new_string (rtsp_path);
 	}
 	g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] Invalid property '%s'", property_name);
 	return NULL;
@@ -398,7 +405,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 					{
 						if (GST_MESSAGE_SRC (message) == GST_OBJECT (s->pipeline))
 						{
-							g_print ("dreambox encoder stream ready at rtsp://127.0.0.1:%s/stream\n", rtsp_port);
+							g_print ("dreambox encoder stream ready at rtsp://127.0.0.1:%s%s\n", rtsp_port, rtsp_path);
 						}
 					}	break;
 					default:
@@ -636,7 +643,7 @@ void enable_rtsp_server(DreamRTSPserver *s)
 {
 	GST_INFO_OBJECT(s, "enable_rtsp_server");
 	s->mounts = gst_rtsp_server_get_mount_points (s->rtsp_server);
-	gst_rtsp_mount_points_add_factory (s->mounts, "/stream", g_object_ref(s->factory));
+	gst_rtsp_mount_points_add_factory (s->mounts, rtsp_path, g_object_ref(s->factory));
 	g_object_unref (s->mounts);
 	s->clients_list = NULL;
 	s->rtsp_media = NULL;
@@ -656,7 +663,7 @@ void disable_rtsp_server(DreamRTSPserver *s)
 	{
 		GList *filter = gst_rtsp_server_client_filter(s->rtsp_server, (GstRTSPServerClientFilterFunc) client_filter_func, s);
 	}
-	gst_rtsp_mount_points_remove_factory (s->mounts, "/stream");
+	gst_rtsp_mount_points_remove_factory (s->mounts, rtsp_path);
 }
 
 void destroy_pipeline(DreamRTSPserver *s)
