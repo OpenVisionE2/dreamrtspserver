@@ -512,20 +512,28 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		GstBuffer *buffer = gst_sample_get_buffer (sample);
 		GstCaps *caps = gst_sample_get_caps (sample);
 
-		GstBuffer *tmp;
-		tmp = gst_buffer_copy (buffer);
-		GST_LOG("original PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)), appsrc);
+		GST_LOG("original PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), appsrc);
 		if (s->rtsp_start_pts == GST_CLOCK_TIME_NONE) {
-			s->rtsp_start_pts = GST_BUFFER_PTS (tmp);
-			s->rtsp_start_dts = GST_BUFFER_DTS (tmp);
-			GST_INFO("set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)), appsrc);
+			if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
+			{
+				GST_LOG("GST_BUFFER_FLAG_DELTA_UNIT dropping!");
+				gst_sample_unref(sample);
+				g_mutex_unlock (&s->rtsp_mutex);
+				return GST_FLOW_OK;
+			}
+			else if (appsink == s->vappsink)
+			{
+				s->rtsp_start_pts = GST_BUFFER_PTS (buffer);
+				s->rtsp_start_dts = GST_BUFFER_DTS (buffer);
+				GST_INFO("frame is IFRAME! set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), appsrc);
+			}
 		}
-		if (GST_BUFFER_PTS (tmp) < s->rtsp_start_pts)
-			GST_BUFFER_PTS (tmp) = 0;
+		if (GST_BUFFER_PTS (buffer) < s->rtsp_start_pts)
+			GST_BUFFER_PTS (buffer) = 0;
 		else
-			GST_BUFFER_PTS (tmp) -= s->rtsp_start_pts;
-		GST_BUFFER_DTS (tmp) -= s->rtsp_start_dts;
-		//    GST_LOG("new PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (tmp)), GST_TIME_ARGS (GST_BUFFER_DTS (tmp)));
+			GST_BUFFER_PTS (buffer) -= s->rtsp_start_pts;
+		GST_BUFFER_DTS (buffer) -= s->rtsp_start_dts;
+		//    GST_LOG("new PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)));
 
 		GstCaps *oldcaps = gst_app_src_get_caps (appsrc);
 		if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
@@ -533,7 +541,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 			GST_LOG("CAPS changed! %" GST_PTR_FORMAT " to %" GST_PTR_FORMAT, oldcaps, caps);
 			gst_app_src_set_caps (appsrc, caps);
 		}
-		gst_app_src_push_buffer (appsrc, tmp);
+		gst_app_src_push_buffer (appsrc, gst_buffer_ref(buffer));
 		gst_sample_unref (sample);
 	}
 	else
