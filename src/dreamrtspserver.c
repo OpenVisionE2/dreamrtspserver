@@ -76,7 +76,7 @@ static const gchar introspection_xml[] =
   "    <method name='enableRTSP'>"
   "      <arg type='b' name='state' direction='in'/>"
   "      <arg type='s' name='path' direction='in'/>"
-  "      <arg type='i' name='port' direction='in'/>"
+  "      <arg type='u' name='port' direction='in'/>"
   "      <arg type='s' name='user' direction='in'/>"
   "      <arg type='s' name='pass' direction='in'/>"
   "      <arg type='b' name='result' direction='out'/>"
@@ -84,8 +84,8 @@ static const gchar introspection_xml[] =
   "    <method name='enableUpstream'>"
   "      <arg type='b' name='state' direction='in'/>"
   "      <arg type='s' name='host' direction='in'/>"
-  "      <arg type='i' name='aport' direction='in'/>"
-  "      <arg type='i' name='vport' direction='in'/>"
+  "      <arg type='u' name='aport' direction='in'/>"
+  "      <arg type='u' name='vport' direction='in'/>"
   "      <arg type='b' name='result' direction='out'/>"
   "    </method>"
   "    <method name='setResolution'>"
@@ -364,7 +364,7 @@ static void handle_method_call (GDBusConnection       *connection,
 			guint32 port;
 			gchar *path, *user, *pass;
 
-			g_variant_get (parameters, "(bsiss)", &state, &path, &port, &user, &pass);
+			g_variant_get (parameters, "(bsuss)", &state, &path, &port, &user, &pass);
 			GST_DEBUG("app->pipeline=%p, enableRTSP state=%i path=%s port=%i user=%s pass=%s", app->pipeline, state, path, port, user, pass);
 
 			if (state == TRUE)
@@ -568,6 +568,7 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 
 static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 {
+	GST_LOG("handover_payload");
 	App *app = user_data;
 	DreamRTSPserver *r = app->rtsp_server;
 
@@ -688,6 +689,8 @@ gboolean create_source_pipeline(App *app)
 	g_signal_connect (G_OBJECT (bus), "message", G_CALLBACK (message_cb), app);
 	gst_object_unref (GST_OBJECT (bus));
 
+	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"create_source_pipeline");
+
 	return gst_element_set_state (app->pipeline, GST_STATE_PAUSED) != GST_STATE_CHANGE_FAILURE;
 }
 
@@ -697,8 +700,8 @@ DreamTCPupstream *create_tcp_upstream(App *app)
 
 	DreamTCPupstream *t = malloc(sizeof(DreamTCPupstream));
 
-	t->abin = gst_element_factory_make ("bin", "abin");
-	t->vbin = gst_element_factory_make ("bin", "abin");
+	t->abin = gst_element_factory_make ("pipeline", "abin");
+	t->vbin = gst_element_factory_make ("pipeline", "vbin");
 
 	t->apay = gst_element_factory_make ("gdppay", "agdppay");
 	t->vpay = gst_element_factory_make ("gdppay", "vgdppay");
@@ -707,7 +710,7 @@ DreamTCPupstream *create_tcp_upstream(App *app)
 	t->vtcpsink = gst_element_factory_make ("tcpclientsink", "vtcpclientsink");
 
 	if (!(t->abin && t->vbin && t->apay && t->vpay && t->atcpsink && t->vtcpsink))
-		g_error ("Failed to create tcp upstream element(s):%s%s%s%s%s%s", t->abin?"":"  audio bin", t->vpay?"":"  video bin", t->abin?"":"  audio gdppay", t->vpay?"":"  video gdppay", t->atcpsink?"":"  audio tcpclientsink", t->vtcpsink?"":"  video tcpclientsink" );
+		g_error ("Failed to create tcp upstream element(s):%s%s%s%s%s%s", t->abin?"":"  audio bin", t->vbin?"":"  video bin", t->apay?"":"  audio gdppay", t->vpay?"":"  video gdppay", t->atcpsink?"":"  audio tcpclientsink", t->vtcpsink?"":"  video tcpclientsink" );
 
 	gst_bin_add_many (GST_BIN(t->abin), t->apay, t->atcpsink, NULL);
 	gst_bin_add_many (GST_BIN(t->vbin), t->vpay, t->vtcpsink, NULL);
@@ -779,6 +782,24 @@ gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 atcpport, g
 
 	if (!t->enabled)
 	{
+		g_object_set (t->atcpsink, "host", upstream_host, NULL);
+		g_object_set (t->vtcpsink, "host", upstream_host, NULL);
+		g_object_set (t->atcpsink, "port", atcpport, NULL);
+		g_object_set (t->vtcpsink, "port", vtcpport, NULL);
+		gchar *check_ahost, *check_vhost;
+		guint32 check_aport, check_vport;
+		g_object_get (t->atcpsink, "host", &check_ahost, NULL);
+		g_object_get (t->vtcpsink, "host", &check_vhost, NULL);
+		g_object_get (t->atcpsink, "port", &check_aport, NULL);
+		g_object_get (t->vtcpsink, "port", &check_vport, NULL);
+		if (g_strcmp0 (upstream_host, check_ahost) || g_strcmp0 (upstream_host, check_vhost))
+			goto fail;
+		if (atcpport != check_aport)
+			goto fail;
+		if (vtcpport != check_vport)
+			goto fail;
+
+		gst_bin_add_many (GST_BIN (app->pipeline), t->abin, t->vbin, NULL);
 		GstPadLinkReturn ret;
 		GstPad *teepad, *sinkpad;
 		teepad = gst_element_get_request_pad (app->atee, "src_%u");
@@ -796,10 +817,13 @@ gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 atcpport, g
 		gst_object_unref (teepad);
 		gst_object_unref (sinkpad);
 
-		g_object_set (t->atcpsink, "host", upstream_host, NULL);
-		g_object_set (t->vtcpsink, "host", upstream_host, NULL);
-		g_object_set (t->atcpsink, "port", atcpport, NULL);
-		g_object_set (t->vtcpsink, "port", vtcpport, NULL);
+		GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
+		GST_INFO_OBJECT(app, "bringing source pipeline to PLAYING=%i", sret);
+		sret = gst_element_set_state (t->abin, GST_STATE_PLAYING);
+		GST_INFO_OBJECT(app, "bringing t->abin to PLAYING=%i", sret);
+		sret = gst_element_set_state (t->vbin, GST_STATE_PLAYING);
+		GST_INFO_OBJECT(app, "bringing t->vbin to PLAYING=%i", sret);
+		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_tcp_upstream");
 
 		t->enabled = TRUE;
 		return TRUE;
@@ -899,6 +923,7 @@ gboolean disable_tcp_upstream(App *app)
 		gst_pad_unlink (teepad, sinkpad);
 		gst_object_unref (teepad);
 		gst_object_unref (sinkpad);
+		gst_bin_remove_many (GST_BIN (app->pipeline), t->abin, t->vbin, NULL);
 		t->enabled = FALSE;
 		return TRUE;
 	}
