@@ -28,12 +28,17 @@ class StreamServerControl(object):
 		self._proxy = self._bus.get_object(self.INTERFACE, self.OBJECT)
 		self._interface = dbus.Interface(self._proxy, self.INTERFACE)
 
-	def setEnabled(self, enabled):
-		self._interface.setEnabled(enabled)
+	def enableSource(self, state):
+		self._interface.enableSource(state)
+
+	def enableRTSP(self, state, path='', port=0, user='', pw=''):
+		self._interface.enableRTSP(state, path, port, user, pw)
+
+	def enableUpstream(self, state, host='', aport=0, vport=0):
+		self._interface.enableUpstream(state, host, aport, vport)
 
 	def isEnabled(self):
 		return self._getProperty(self.PROP_STATE)
-	enabled = property(isEnabled, setEnabled)
 
 	def getAudioBitrate(self):
 		return self._getProperty(self.PROP_AUDIO_BITRATE)
@@ -72,8 +77,5 @@ class StreamServerControl(object):
 		self._proxy.Set(self.INTERFACE, prop, val, dbus_interface=dbus.PROPERTIES_IFACE)
 
 ctrl = StreamServerControl()
-ctrl.setEnabled(True)
-ctrl.setAudioBitrate(128)
-print "audio: ", ctrl.getAudioBitrate()
-ctrl.setVideoBitrate(1024)
-print "video: ", ctrl.getVideoBitrate()
+ctrl.enableSource(True)
+ctrl.enableRTSP(True)
