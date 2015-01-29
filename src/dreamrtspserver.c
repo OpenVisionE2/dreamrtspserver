@@ -33,7 +33,7 @@ typedef struct {
 	gboolean enabled;
 	GstElement *apay, *vpay;
 	GstElement *atcpsink, *vtcpsink;
-	GstElement *abin, *vbin;
+	GstElement *upstreambin;
 } DreamTCPupstream;
 
 typedef struct {
@@ -568,7 +568,6 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 
 static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 {
-	GST_LOG("handover_payload");
 	App *app = user_data;
 	DreamRTSPserver *r = app->rtsp_server;
 
@@ -659,18 +658,6 @@ gboolean create_source_pipeline(App *app)
 	gst_element_link_many (app->asrc, app->aparse, app->aq, app->atee, NULL);
 	gst_element_link_many (app->vsrc, app->vparse, app->vq, app->vtee, NULL);
 
-	GstPad *teepad, *sinkpad;
-	teepad = gst_element_get_request_pad (app->atee, "src_%u");
-	sinkpad = gst_element_get_static_pad (app->aappsink, "sink");
-	gst_pad_link (teepad, sinkpad);
-	gst_object_unref (teepad);
-	gst_object_unref (sinkpad);
-	teepad = gst_element_get_request_pad (app->vtee, "src_%u");
-	sinkpad = gst_element_get_static_pad (app->vappsink, "sink");
-	gst_pad_link (teepad, sinkpad);
-	gst_object_unref (teepad);
-	gst_object_unref (sinkpad);
-
 	g_object_set (G_OBJECT (app->aq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 	g_object_set (G_OBJECT (app->vq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 
@@ -700,8 +687,7 @@ DreamTCPupstream *create_tcp_upstream(App *app)
 
 	DreamTCPupstream *t = malloc(sizeof(DreamTCPupstream));
 
-	t->abin = gst_element_factory_make ("pipeline", "abin");
-	t->vbin = gst_element_factory_make ("pipeline", "vbin");
+// 	t->upstreambin = gst_element_factory_make ("pipeline", "upstreambin");
 
 	t->apay = gst_element_factory_make ("gdppay", "agdppay");
 	t->vpay = gst_element_factory_make ("gdppay", "vgdppay");
@@ -709,29 +695,28 @@ DreamTCPupstream *create_tcp_upstream(App *app)
 	t->atcpsink = gst_element_factory_make ("tcpclientsink", "atcpclientsink");
 	t->vtcpsink = gst_element_factory_make ("tcpclientsink", "vtcpclientsink");
 
-	if (!(t->abin && t->vbin && t->apay && t->vpay && t->atcpsink && t->vtcpsink))
-		g_error ("Failed to create tcp upstream element(s):%s%s%s%s%s%s", t->abin?"":"  audio bin", t->vbin?"":"  video bin", t->apay?"":"  audio gdppay", t->vpay?"":"  video gdppay", t->atcpsink?"":"  audio tcpclientsink", t->vtcpsink?"":"  video tcpclientsink" );
+	if (!(t->apay && t->vpay && t->atcpsink && t->vtcpsink))
+		g_error ("Failed to create tcp upstream element(s):%s%s%s%s", t->apay?"":"  audio gdppay", t->vpay?"":"  video gdppay", t->atcpsink?"":"  audio tcpclientsink", t->vtcpsink?"":"  video tcpclientsink" );
 
-	gst_bin_add_many (GST_BIN(t->abin), t->apay, t->atcpsink, NULL);
-	gst_bin_add_many (GST_BIN(t->vbin), t->vpay, t->vtcpsink, NULL);
-	if (!gst_element_link_many (t->apay, t->atcpsink, NULL)) {
-		g_error ("Failed to link tcp upstreambin audio elements");
-	}
-	if (!gst_element_link_many (t->vpay, t->vtcpsink, NULL)) {
-		g_error ("Failed to link tcp upstreambin video elements");
-	}
-
-	GstPad *asinkpad, *vsinkpad, *paypad;
-	paypad = gst_element_get_static_pad (t->apay, "sink");
-	asinkpad = gst_ghost_pad_new ("sink", paypad);
-	gst_pad_set_active (asinkpad, TRUE);
-	gst_element_add_pad (t->abin, asinkpad);
-
-	gst_object_unref (paypad);
-	paypad = gst_element_get_static_pad (t->vpay, "sink");
-	vsinkpad = gst_ghost_pad_new ("sink", paypad);
-	gst_pad_set_active (vsinkpad, TRUE);
-	gst_element_add_pad (t->vbin, vsinkpad);
+// 	gst_bin_add_many (GST_BIN(t->upstreambin), t->apay, t->atcpsink, t->vpay, t->vtcpsink, NULL);
+// 	if (!gst_element_link_many (t->apay, t->atcpsink, NULL)) {
+// 		g_error ("Failed to link tcp upstreambin audio elements");
+// 	}
+// 	if (!gst_element_link_many (t->vpay, t->vtcpsink, NULL)) {
+// 		g_error ("Failed to link tcp upstreambin video elements");
+// 	}
+// 
+// 	GstPad *asinkpad, *vsinkpad, *paypad;
+// 	paypad = gst_element_get_static_pad (t->apay, "sink");
+// 	asinkpad = gst_ghost_pad_new ("asink", paypad);
+// 	gst_pad_set_active (asinkpad, TRUE);
+// 	gst_element_add_pad (t->upstreambin, asinkpad);
+// 
+// 	gst_object_unref (paypad);
+// 	paypad = gst_element_get_static_pad (t->vpay, "sink");
+// 	vsinkpad = gst_ghost_pad_new ("vsink", paypad);
+// 	gst_pad_set_active (vsinkpad, TRUE);
+// 	gst_element_add_pad (t->upstreambin, vsinkpad);
 
 	t->enabled = FALSE;
 
@@ -799,18 +784,28 @@ gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 atcpport, g
 		if (vtcpport != check_vport)
 			goto fail;
 
-		gst_bin_add_many (GST_BIN (app->pipeline), t->abin, t->vbin, NULL);
+		gst_bin_add_many (GST_BIN(app->pipeline), t->apay, t->atcpsink, t->vpay, t->vtcpsink, NULL);
+		if (!gst_element_link_many (t->apay, t->atcpsink, NULL)) {
+			g_error ("Failed to link tcp upstreambin audio elements");
+		}
+		if (!gst_element_link_many (t->vpay, t->vtcpsink, NULL)) {
+			g_error ("Failed to link tcp upstreambin video elements");
+		}
+// 		gst_bin_add_many (GST_BIN (app->pipeline), t->upstreambin, NULL);
+
 		GstPadLinkReturn ret;
 		GstPad *teepad, *sinkpad;
 		teepad = gst_element_get_request_pad (app->atee, "src_%u");
-		sinkpad = gst_element_get_static_pad (t->abin, "sink");
+// 		sinkpad = gst_element_get_static_pad (t->upstreambin, "asink");
+		sinkpad = gst_element_get_static_pad (t->apay, "sink");
 		ret = gst_pad_link (teepad, sinkpad);
 		gst_object_unref (teepad);
 		gst_object_unref (sinkpad);
 		if (ret != GST_PAD_LINK_OK)
 			goto fail;
 		teepad = gst_element_get_request_pad (app->vtee, "src_%u");
-		sinkpad = gst_element_get_static_pad (t->vbin, "sink");
+// 		sinkpad = gst_element_get_static_pad (t->upstreambin, "vsink");
+		sinkpad = gst_element_get_static_pad (t->vpay, "sink");
 		gst_pad_link (teepad, sinkpad);
 		if (ret != GST_PAD_LINK_OK)
 			goto fail;
@@ -818,13 +813,18 @@ gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 atcpport, g
 		gst_object_unref (sinkpad);
 
 		GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
-		GST_INFO_OBJECT(app, "bringing source pipeline to PLAYING=%i", sret);
-		sret = gst_element_set_state (t->abin, GST_STATE_PLAYING);
-		GST_INFO_OBJECT(app, "bringing t->abin to PLAYING=%i", sret);
-		sret = gst_element_set_state (t->vbin, GST_STATE_PLAYING);
-		GST_INFO_OBJECT(app, "bringing t->vbin to PLAYING=%i", sret);
 		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_tcp_upstream");
-
+		if (sret == GST_STATE_CHANGE_FAILURE)
+			goto fail;
+		else if (sret == GST_STATE_CHANGE_ASYNC)
+		{
+			GstState state;
+			gst_element_get_state (GST_ELEMENT(t->vtcpsink), &state, NULL, 2*GST_SECOND);
+			GST_INFO_OBJECT(app, "state is %s", gst_element_state_get_name (state));
+			if (state != GST_STATE_PLAYING)
+				goto fail;
+		}
+		GST_INFO_OBJECT(app, "enabled tcp upstream, pipeline is PLAYING");
 		t->enabled = TRUE;
 		return TRUE;
 	}
@@ -832,6 +832,7 @@ gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 atcpport, g
 
 fail:
 	GST_ERROR_OBJECT (app, "failed to enable tcp upstream!");
+	disable_tcp_upstream(app);
 	return FALSE;
 }
 
@@ -841,6 +842,18 @@ gboolean enable_rtsp_server(App *app, gchar *path, guint32 port, gchar *user, gc
 	DreamRTSPserver *r = app->rtsp_server;
 	if (!r->enabled)
 	{
+		GstPad *teepad, *sinkpad;
+		teepad = gst_element_get_request_pad (app->atee, "src_%u");
+		sinkpad = gst_element_get_static_pad (app->aappsink, "sink");
+		gst_pad_link (teepad, sinkpad);
+		gst_object_unref (teepad);
+		gst_object_unref (sinkpad);
+		teepad = gst_element_get_request_pad (app->vtee, "src_%u");
+		sinkpad = gst_element_get_static_pad (app->vappsink, "sink");
+		gst_pad_link (teepad, sinkpad);
+		gst_object_unref (teepad);
+		gst_object_unref (sinkpad);
+
 		gchar *credentials = "";
 		if (strlen(user)) {
 			r->rtsp_user = user;
@@ -909,21 +922,37 @@ gboolean disable_rtsp_server(App *app)
 gboolean disable_tcp_upstream(App *app)
 {
 	GST_INFO("disable_tcp_upstream");
+
 	DreamTCPupstream *t = app->tcp_upstream;
+
+	gst_element_set_state (t->apay, GST_STATE_READY);
+	gst_element_set_state (t->vpay, GST_STATE_READY);
+	gst_element_set_state (t->atcpsink, GST_STATE_READY);
+	gst_element_set_state (t->vtcpsink, GST_STATE_READY);
+
+	GstPad *teepad, *sinkpad;
+	sinkpad = gst_element_get_static_pad (t->apay, "sink");
+	teepad = gst_pad_get_peer(sinkpad);
+	gst_pad_unlink (teepad, sinkpad);
+	gst_element_release_request_pad (app->atee, teepad);
+	gst_object_unref (teepad);
+	gst_object_unref (sinkpad);
+	sinkpad = gst_element_get_static_pad (t->vpay, "sink");
+	teepad = gst_pad_get_peer(sinkpad);
+	gst_pad_unlink (teepad, sinkpad);
+	gst_element_release_request_pad (app->vtee, teepad);
+	gst_object_unref (teepad);
+	gst_object_unref (sinkpad);
+	gst_element_unlink(t->apay, t->atcpsink);
+	gst_element_unlink(t->vpay, t->vtcpsink);
+	gst_object_ref(t->apay);
+	gst_object_ref(t->vpay);
+	gst_object_ref(t->atcpsink);
+	gst_object_ref(t->vtcpsink);
+
+	gst_bin_remove_many (GST_BIN (app->pipeline), t->apay, t->vpay, t->atcpsink, t->vtcpsink, NULL);
 	if (t->enabled)
 	{
-		GstPad *teepad, *sinkpad;
-		teepad = gst_element_get_request_pad (app->atee, "src_%u");
-		sinkpad = gst_element_get_static_pad (t->abin, "sink");
-		gst_pad_unlink (teepad, sinkpad);
-		gst_object_unref (teepad);
-		gst_object_unref (sinkpad);
-		teepad = gst_element_get_request_pad (app->vtee, "src_%u");
-		sinkpad = gst_element_get_static_pad (t->vbin, "sink");
-		gst_pad_unlink (teepad, sinkpad);
-		gst_object_unref (teepad);
-		gst_object_unref (sinkpad);
-		gst_bin_remove_many (GST_BIN (app->pipeline), t->abin, t->vbin, NULL);
 		t->enabled = FALSE;
 		return TRUE;
 	}

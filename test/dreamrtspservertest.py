@@ -29,13 +29,13 @@ class StreamServerControl(object):
 		self._interface = dbus.Interface(self._proxy, self.INTERFACE)
 
 	def enableSource(self, state):
-		self._interface.enableSource(state)
+		return self._interface.enableSource(state)
 
 	def enableRTSP(self, state, path='', port=0, user='', pw=''):
-		self._interface.enableRTSP(state, path, port, user, pw)
+		return self._interface.enableRTSP(state, path, port, user, pw)
 
 	def enableUpstream(self, state, host='', aport=0, vport=0):
-		self._interface.enableUpstream(state, host, aport, vport)
+		return self._interface.enableUpstream(state, host, aport, vport)
 
 	def isEnabled(self):
 		return self._getProperty(self.PROP_STATE)
