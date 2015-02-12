@@ -28,12 +28,16 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 
 #define DEFAULT_RTSP_PORT 554
 #define DEFAULT_RTSP_PATH "/stream"
+#define TOKEN_LEN 36
 
 typedef struct {
 	gboolean enabled;
-	GstElement *apay, *vpay;
-	GstElement *atcpsink, *vtcpsink;
+	GstElement *afilter, *vfilter;
+	GstElement *payloader;
+	GstElement *tsmux;
+	GstElement *tcpsink;
 	GstElement *upstreambin;
+	char token[TOKEN_LEN];
 } DreamTCPupstream;
 
 typedef struct {
@@ -84,8 +88,8 @@ static const gchar introspection_xml[] =
   "    <method name='enableUpstream'>"
   "      <arg type='b' name='state' direction='in'/>"
   "      <arg type='s' name='host' direction='in'/>"
-  "      <arg type='u' name='aport' direction='in'/>"
-  "      <arg type='u' name='vport' direction='in'/>"
+  "      <arg type='u' name='port' direction='in'/>"
+  "      <arg type='s' name='token' direction='in'/>"
   "      <arg type='b' name='result' direction='out'/>"
   "    </method>"
   "    <method name='setResolution'>"
@@ -106,7 +110,7 @@ static const gchar introspection_xml[] =
 gboolean create_source_pipeline(App *app);
 gboolean enable_rtsp_server(App *app, gchar *path, guint32 port, gchar *user, gchar *pass);
 gboolean disable_rtsp_server(App *app);
-gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 atcpport, guint32 vtcpport);
+gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 upstream_port, gchar *token);
 gboolean disable_tcp_upstream(App *app);
 gboolean destroy_pipeline(App *app);
 
@@ -371,6 +375,9 @@ static void handle_method_call (GDBusConnection       *connection,
 				result = enable_rtsp_server(app, path, port, user, pass);
 			else if (state == FALSE)
 				result = disable_rtsp_server(app);
+			g_free(path);
+			g_free(user);
+			g_free(pass);
 		}
 		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
 	}
@@ -380,16 +387,18 @@ static void handle_method_call (GDBusConnection       *connection,
 		if (app->pipeline)
 		{
 			gboolean state;
-			gchar *upstream_host;
-			guint32 atcpport, vtcpport;
+			gchar *upstream_host, *token;
+			guint32 upstream_port;
 
-			g_variant_get (parameters, "(bsuu)", &state, &upstream_host, &atcpport, &vtcpport);
-			GST_DEBUG("app->pipeline=%p, enableUpstream state=%i host=%s audioport=%i videoport=%i", app->pipeline, state, upstream_host, atcpport, vtcpport);
+			g_variant_get (parameters, "(bsus)", &state, &upstream_host, &upstream_port, &token);
+			GST_DEBUG("app->pipeline=%p, enableUpstream state=%i host=%s port=%i token=%s", app->pipeline, state, upstream_host, upstream_port, token);
 
 			if (state == TRUE && !app->tcp_upstream->enabled)
-				result = enable_tcp_upstream(app, upstream_host, atcpport, vtcpport);
+				result = enable_tcp_upstream(app, upstream_host, upstream_port, token);
 			else if (state == FALSE && app->tcp_upstream->enabled)
 				result = disable_tcp_upstream(app);
+			g_free(upstream_host);
+			g_free(token);
 		}
 		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
 	}
@@ -689,14 +698,17 @@ DreamTCPupstream *create_tcp_upstream(App *app)
 
 // 	t->upstreambin = gst_element_factory_make ("pipeline", "upstreambin");
 
-	t->apay = gst_element_factory_make ("gdppay", "agdppay");
-	t->vpay = gst_element_factory_make ("gdppay", "vgdppay");
+	t->afilter = gst_element_factory_make ("capsfilter", "afilter");
+	t->vfilter = gst_element_factory_make ("capsfilter", "vfilter");
 
-	t->atcpsink = gst_element_factory_make ("tcpclientsink", "atcpclientsink");
-	t->vtcpsink = gst_element_factory_make ("tcpclientsink", "vtcpclientsink");
+	t->payloader = gst_element_factory_make ("gdppay", NULL);
 
-	if (!(t->apay && t->vpay && t->atcpsink && t->vtcpsink))
-		g_error ("Failed to create tcp upstream element(s):%s%s%s%s", t->apay?"":"  audio gdppay", t->vpay?"":"  video gdppay", t->atcpsink?"":"  audio tcpclientsink", t->vtcpsink?"":"  video tcpclientsink" );
+	t->tsmux = gst_element_factory_make ("mpegtsmux", NULL);
+
+	t->tcpsink = gst_element_factory_make ("tcpclientsink", NULL);
+
+	if (!(t->payloader && t->afilter && t->vfilter && t->tsmux && t->tcpsink ))
+		g_error ("Failed to create tcp upstream element(s):%s%s%s%s%s", t->payloader?"":"  gdppay", t->afilter?"":"  audio filter", t->vfilter?"":"  video filter ", t->tsmux?"":"  mpegtsmux", t->tcpsink?"":"  tcpclientsink" );
 
 // 	gst_bin_add_many (GST_BIN(t->upstreambin), t->apay, t->atcpsink, t->vpay, t->vtcpsink, NULL);
 // 	if (!gst_element_link_many (t->apay, t->atcpsink, NULL)) {
@@ -759,59 +771,118 @@ DreamRTSPserver *create_rtsp_server(App *app)
 	return r;
 }
 
-gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 atcpport, guint32 vtcpport)
+static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
 {
-	GST_DEBUG_OBJECT(app, "enable_tcp_upstream host=%s audioport=%i videoport=%i", upstream_host, atcpport, vtcpport);
+	App *app = user_data;
+	GError *err = NULL;
+	GstBuffer *token_buf = gst_buffer_new_wrapped (app->tcp_upstream->token, TOKEN_LEN);
+	GstPad * srcpad = gst_element_get_static_pad (app->tcp_upstream->payloader, "src");
+	
+		
+	GST_INFO ("inject_authorizaion on pad %s:%s, created token_buf %" GST_PTR_FORMAT "", GST_DEBUG_PAD_NAME (sinkpad), token_buf);
+	
+	GstFlowReturn pret = gst_pad_push (srcpad, token_buf);
+	
+	GST_INFO ("gst_pad_push token to %s:%s ret=%s", GST_DEBUG_PAD_NAME (srcpad), gst_flow_get_name (pret));
+	
+	
+/*	
+	GstTCPClientSink *tcpclientsink = GST_TCP_CLIENT_SINK(app->tcp_upstream->tcpsink);
+	GSocket *sock = tcpclientsink->socket;
+	
+	gssize wret = g_socket_send (sock, app->tcp_upstream->token, TOKEN_LEN, NULL, &err);
+	if (wret < 0) {
+		GST_ERROR_OBJECT (app, ("Error while sending data socket error: %s", err->message));
+	}
+	else {
+		GST_DEBUG_OBJECT(app, "inject_authorization token '%s' wrote %i", app->tcp_upstream->token, wret);
+	}*/
+
+	return GST_PAD_PROBE_REMOVE;
+}
+
+gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 upstream_port, gchar *token)
+{
+	GST_DEBUG_OBJECT(app, "enable_tcp_upstream host=%s port=%i token=%s", upstream_host, upstream_port, token);
 
 	DreamTCPupstream *t = app->tcp_upstream;
 
 	if (!t->enabled)
 	{
-		g_object_set (t->atcpsink, "host", upstream_host, NULL);
-		g_object_set (t->vtcpsink, "host", upstream_host, NULL);
-		g_object_set (t->atcpsink, "port", atcpport, NULL);
-		g_object_set (t->vtcpsink, "port", vtcpport, NULL);
-		gchar *check_ahost, *check_vhost;
-		guint32 check_aport, check_vport;
-		g_object_get (t->atcpsink, "host", &check_ahost, NULL);
-		g_object_get (t->vtcpsink, "host", &check_vhost, NULL);
-		g_object_get (t->atcpsink, "port", &check_aport, NULL);
-		g_object_get (t->vtcpsink, "port", &check_vport, NULL);
-		if (g_strcmp0 (upstream_host, check_ahost) || g_strcmp0 (upstream_host, check_vhost))
+		g_object_set (t->tcpsink, "host", upstream_host, NULL);
+		g_object_set (t->tcpsink, "port", upstream_port, NULL);
+		gchar *check_host;
+		guint32 check_port;
+		g_object_get (t->tcpsink, "host", &check_host, NULL);
+		g_object_get (t->tcpsink, "port", &check_port, NULL);
+		if (g_strcmp0 (upstream_host, check_host))
 			goto fail;
-		if (atcpport != check_aport)
-			goto fail;
-		if (vtcpport != check_vport)
+		if (upstream_port != check_port)
 			goto fail;
 
-		gst_bin_add_many (GST_BIN(app->pipeline), t->apay, t->atcpsink, t->vpay, t->vtcpsink, NULL);
-		if (!gst_element_link_many (t->apay, t->atcpsink, NULL)) {
-			g_error ("Failed to link tcp upstreambin audio elements");
-		}
-		if (!gst_element_link_many (t->vpay, t->vtcpsink, NULL)) {
-			g_error ("Failed to link tcp upstreambin video elements");
-		}
-// 		gst_bin_add_many (GST_BIN (app->pipeline), t->upstreambin, NULL);
+		gchar *capsstr;
+
+		strcpy(t->token, token);
+
+		gst_bin_add_many (GST_BIN(app->pipeline), t->afilter, t->vfilter, t->tsmux, t->payloader, t->tcpsink, NULL);
 
 		GstPadLinkReturn ret;
-		GstPad *teepad, *sinkpad;
-		teepad = gst_element_get_request_pad (app->atee, "src_%u");
+		GstPad *srcpad, *sinkpad;
+		srcpad = gst_element_get_request_pad (app->atee, "src_%u");
 // 		sinkpad = gst_element_get_static_pad (t->upstreambin, "asink");
-		sinkpad = gst_element_get_static_pad (t->apay, "sink");
-		ret = gst_pad_link (teepad, sinkpad);
-		gst_object_unref (teepad);
+		sinkpad = gst_element_get_static_pad (t->afilter, "sink");
+		ret = gst_pad_link (srcpad, sinkpad);
+		gst_object_unref (srcpad);
 		gst_object_unref (sinkpad);
 		if (ret != GST_PAD_LINK_OK)
 			goto fail;
-		teepad = gst_element_get_request_pad (app->vtee, "src_%u");
+		srcpad = gst_element_get_request_pad (app->vtee, "src_%u");
 // 		sinkpad = gst_element_get_static_pad (t->upstreambin, "vsink");
-		sinkpad = gst_element_get_static_pad (t->vpay, "sink");
-		gst_pad_link (teepad, sinkpad);
+		sinkpad = gst_element_get_static_pad (t->vfilter, "sink");
+		ret = gst_pad_link (srcpad, sinkpad);
 		if (ret != GST_PAD_LINK_OK)
 			goto fail;
-		gst_object_unref (teepad);
+		gst_object_unref (srcpad);
+		gst_object_unref (sinkpad);
+		
+		GstCaps *fltcaps;
+		capsstr = g_strdup_printf ("audio/mpeg, token=(string)%s", token);
+		fltcaps = gst_caps_from_string (capsstr);
+		g_object_set (t->afilter, "caps", fltcaps, NULL);
+		g_free(capsstr);
+		
+		srcpad = gst_element_get_static_pad (t->afilter, "src");
+		sinkpad = gst_element_get_compatible_pad (t->tsmux, srcpad, fltcaps);
+		ret = gst_pad_link (srcpad, sinkpad);
+		gst_caps_unref(fltcaps);
+		if (ret != GST_PAD_LINK_OK)
+			goto fail;
+		gst_object_unref (srcpad);
+		gst_object_unref (sinkpad);
+		
+		capsstr = g_strdup_printf ("video/x-h264, token=(string)%s", token);
+		fltcaps = gst_caps_from_string (capsstr);
+		g_object_set (t->vfilter, "caps", fltcaps, NULL);
+		g_free(capsstr);
+		
+		srcpad = gst_element_get_static_pad (t->vfilter, "src");
+		sinkpad = gst_element_get_compatible_pad (t->tsmux, srcpad, fltcaps);
+		ret = gst_pad_link (srcpad, sinkpad);
+		gst_caps_unref(fltcaps);
+		if (ret != GST_PAD_LINK_OK)
+			goto fail;
+		gst_object_unref (srcpad);
 		gst_object_unref (sinkpad);
 
+		if (!gst_element_link_many (t->tsmux, t->payloader, t->tcpsink, NULL)) {
+			g_error ("Failed to link tsmux to tcpclientsink");
+		}
+
+		sinkpad = gst_element_get_static_pad (t->payloader, "sink");
+		
+		gst_pad_add_probe (srcpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) inject_authorization, app, NULL);
+		gst_object_unref (sinkpad);
+		
 		GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
 		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_tcp_upstream");
 		if (sret == GST_STATE_CHANGE_FAILURE)
@@ -819,7 +890,7 @@ gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 atcpport, g
 		else if (sret == GST_STATE_CHANGE_ASYNC)
 		{
 			GstState state;
-			gst_element_get_state (GST_ELEMENT(t->vtcpsink), &state, NULL, 2*GST_SECOND);
+			gst_element_get_state (GST_ELEMENT(t->tcpsink), &state, NULL, 2*GST_SECOND);
 			GST_INFO_OBJECT(app, "state is %s", gst_element_state_get_name (state));
 			if (state != GST_STATE_PLAYING)
 				goto fail;
@@ -896,7 +967,7 @@ gboolean enable_rtsp_server(App *app, gchar *path, guint32 port, gchar *user, gc
 	return FALSE;
 }
 
-GstRTSPFilterResult *client_filter_func (GstRTSPServer *server, GstRTSPClient *client, gpointer user_data)
+GstRTSPFilterResult client_filter_func (GstRTSPServer *server, GstRTSPClient *client, gpointer user_data)
 {
 	App *app = user_data;
 	GST_INFO("client_filter_func %" GST_PTR_FORMAT "  (number of clients: %i)", client, g_list_length(app->rtsp_server->clients_list));
@@ -925,32 +996,29 @@ gboolean disable_tcp_upstream(App *app)
 
 	DreamTCPupstream *t = app->tcp_upstream;
 
-	gst_element_set_state (t->apay, GST_STATE_READY);
-	gst_element_set_state (t->vpay, GST_STATE_READY);
-	gst_element_set_state (t->atcpsink, GST_STATE_READY);
-	gst_element_set_state (t->vtcpsink, GST_STATE_READY);
+	gst_element_set_state (t->payloader, GST_STATE_READY);
+	gst_element_set_state (t->tsmux, GST_STATE_READY);
+	gst_element_set_state (t->tcpsink, GST_STATE_READY);
 
-	GstPad *teepad, *sinkpad;
-	sinkpad = gst_element_get_static_pad (t->apay, "sink");
-	teepad = gst_pad_get_peer(sinkpad);
-	gst_pad_unlink (teepad, sinkpad);
-	gst_element_release_request_pad (app->atee, teepad);
-	gst_object_unref (teepad);
-	gst_object_unref (sinkpad);
-	sinkpad = gst_element_get_static_pad (t->vpay, "sink");
-	teepad = gst_pad_get_peer(sinkpad);
-	gst_pad_unlink (teepad, sinkpad);
-	gst_element_release_request_pad (app->vtee, teepad);
-	gst_object_unref (teepad);
-	gst_object_unref (sinkpad);
-	gst_element_unlink(t->apay, t->atcpsink);
-	gst_element_unlink(t->vpay, t->vtcpsink);
-	gst_object_ref(t->apay);
-	gst_object_ref(t->vpay);
-	gst_object_ref(t->atcpsink);
-	gst_object_ref(t->vtcpsink);
+// 	GstPad *teepad, *sinkpad;
+// 	sinkpad = gst_element_get_static_pad (t->apay, "sink");
+// 	teepad = gst_pad_get_peer(sinkpad);
+// 	gst_pad_unlink (teepad, sinkpad);
+// 	gst_element_release_request_pad (app->atee, teepad);
+// 	gst_object_unref (teepad);
+// 	gst_object_unref (sinkpad);
+// 	sinkpad = gst_element_get_static_pad (t->vpay, "sink");
+// 	teepad = gst_pad_get_peer(sinkpad);
+// 	gst_pad_unlink (teepad, sinkpad);
+// 	gst_element_release_request_pad (app->vtee, teepad);
+// 	gst_object_unref (teepad);
+// 	gst_object_unref (sinkpad);
+// 	gst_element_unlink(t->tsmux, t->tcpsink);
+// 	gst_object_ref(t->payloader);
+// 	gst_object_ref(t->tsmux);
+// 	gst_object_ref(t->tcpsink);
 
-	gst_bin_remove_many (GST_BIN (app->pipeline), t->apay, t->vpay, t->atcpsink, t->vtcpsink, NULL);
+	gst_bin_remove_many (GST_BIN (app->pipeline), t->payloader, t->tsmux, t->tcpsink, NULL);
 	if (t->enabled)
 	{
 		t->enabled = FALSE;
