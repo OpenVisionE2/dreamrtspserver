@@ -303,7 +303,6 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 
 	if (g_strcmp0 (property_name, "audioBitrate") == 0)
 	{
-		GstElement *source = gst_bin_get_by_name(GST_BIN(app->pipeline), "dreamaudiosource0");
 		if (app->asrc)
 		{
 			g_object_set (G_OBJECT (app->asrc), "bitrate", g_variant_get_int32 (value), NULL);
@@ -323,11 +322,14 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 		if (gst_set_framerate(app, g_variant_get_int32 (value)))
 			return 1;
 		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] can't set property '%s' to %d", property_name, g_variant_get_int32 (value));
+		return 0;
 	}
 	else
 	{
 		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] Invalid property: '%s'", property_name);
+		return 0;
 	} // unknown property
+	g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] Wrong state - can't set property: '%s'", property_name);
 	return 0;
 } // handle_set_property
 
