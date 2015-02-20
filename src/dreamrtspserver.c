@@ -450,6 +450,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 {
 	App *app = user_data;
 
+	g_mutex_lock (&app->rtsp_mutex);
 	switch (GST_MESSAGE_TYPE (message)) {
 		case GST_MESSAGE_STATE_CHANGED:
 		{
@@ -489,11 +490,9 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 			{
 				if (err->code == GST_RESOURCE_ERROR_WRITE)
 				{
-					g_mutex_lock (&app->rtsp_mutex);
 					GST_INFO ("element %s: %s -> this means PEER DISCONNECTED", name, err->message);
 					GST_LOG ("Additional ERROR debug info: %s", debug);
 					disable_tcp_upstream(app);
-					g_mutex_unlock (&app->rtsp_mutex);
 				}
 			}
 			else
@@ -523,11 +522,13 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 		}
 		case GST_MESSAGE_EOS:
 			g_print ("Got EOS\n");
+			g_mutex_unlock (&app->rtsp_mutex);
 			g_main_loop_quit (app->loop);
-			break;
+			return FALSE;
 		default:
 			break;
 	}
+	g_mutex_unlock (&app->rtsp_mutex);
 	return TRUE;
 }
 
@@ -638,7 +639,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 gboolean create_source_pipeline(App *app)
 {
 	GST_INFO_OBJECT(app, "create_source_pipeline");
-
+	g_mutex_lock (&app->rtsp_mutex);
 	app->pipeline = gst_pipeline_new (NULL);
 	app->asrc = gst_element_factory_make ("dreamaudiosource", "dreamaudiosource0");
 	app->vsrc = gst_element_factory_make ("dreamvideosource", "dreamvideosource0");
@@ -671,29 +672,14 @@ gboolean create_source_pipeline(App *app)
 	gst_object_unref (GST_OBJECT (bus));
 
 	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"create_source_pipeline");
-
-	GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_READY);
-	if (sret == GST_STATE_CHANGE_FAILURE)
-		return FALSE;
-	else if (sret == GST_STATE_CHANGE_ASYNC)
-	{
-		GstState state;
-		gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 1*GST_SECOND);
-		GST_INFO_OBJECT(app, "state is %s", gst_element_state_get_name (state));
-		if (state != GST_STATE_READY)
-			return FALSE;
-	}
-	else if (sret == GST_STATE_CHANGE_SUCCESS)
-	{
-		GST_INFO_OBJECT(app, "GST_STATE_CHANGE_SUCCESS");
-			return TRUE;
-	}
+	g_mutex_unlock (&app->rtsp_mutex);
+	return gst_element_set_state (app->pipeline, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS;
 }
 
 DreamRTSPserver *create_rtsp_server(App *app)
 {
 	GST_INFO_OBJECT(app, "create_rtsp_server");
-
+	g_mutex_lock (&app->rtsp_mutex);
 	GstElement *appsrc, *vpay, *apay, *udpsrc;
 	appsrc = gst_element_factory_make ("appsrc", NULL);
 	vpay = gst_element_factory_make ("rtph264pay", NULL);
@@ -735,6 +721,7 @@ DreamRTSPserver *create_rtsp_server(App *app)
 	g_signal_connect (r->factory, "media-configure", (GCallback) media_configure, app);
 
 	r->enabled = FALSE;
+	g_mutex_unlock (&app->rtsp_mutex);
 
 	return r;
 }
@@ -746,7 +733,7 @@ static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo
 	GstBuffer *token_buf = gst_buffer_new_wrapped (app->tcp_upstream->token, TOKEN_LEN);
 	GstPad * srcpad = gst_element_get_static_pad (app->tcp_upstream->payloader, "src");
 	
-	GST_INFO ("inject_authorizaion on pad %s:%s, created token_buf %" GST_PTR_FORMAT "", GST_DEBUG_PAD_NAME (sinkpad), token_buf);
+	GST_INFO ("injecting authorization on pad %s:%s, created token_buf %" GST_PTR_FORMAT "", GST_DEBUG_PAD_NAME (sinkpad), token_buf);
 	
 	GstFlowReturn pret = gst_pad_push (srcpad, gst_buffer_ref(token_buf));
 	
@@ -858,11 +845,12 @@ gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 upstream_po
 
 			GValue item = G_VALUE_INIT;
 				GstIterator* iter = gst_bin_iterate_elements(GST_BIN(app->pipeline));
-				while(GST_ITERATOR_OK == gst_iterator_next(iter, (GValue*)&item))
+				while (GST_ITERATOR_OK == gst_iterator_next(iter, (GValue*)&item))
 				{
 					GstElement *elem = g_value_get_object(&item);
 					gst_element_get_state (elem, &state, NULL, GST_USECOND);
-					GST_INFO_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (state));
+					if ( state != GST_STATE_PLAYING)
+						GST_INFO_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (state));
 				}
 				gst_iterator_free(iter);
 			if (state != GST_STATE_PLAYING)
