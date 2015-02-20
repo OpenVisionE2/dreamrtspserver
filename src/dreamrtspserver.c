@@ -73,10 +73,6 @@ static GDBusNodeInfo *introspection_data = NULL;
 static const gchar introspection_xml[] =
   "<node>"
   "  <interface name='com.dreambox.RTSPserver'>"
-  "    <method name='enableSource'>"
-  "      <arg type='b' name='state' direction='in'/>"
-  "      <arg type='b' name='result' direction='out'/>"
-  "    </method>"
   "    <method name='enableRTSP'>"
   "      <arg type='b' name='state' direction='in'/>"
   "      <arg type='s' name='path' direction='in'/>"
@@ -108,6 +104,7 @@ static const gchar introspection_xml[] =
   "</node>";
 
 gboolean create_source_pipeline(App *app);
+DreamRTSPserver *create_rtsp_server(App *app);
 gboolean enable_rtsp_server(App *app, gchar *path, guint32 port, gchar *user, gchar *pass);
 gboolean disable_rtsp_server(App *app);
 gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 upstream_port, gchar *token);
@@ -347,21 +344,7 @@ static void handle_method_call (GDBusConnection       *connection,
 	gchar *paramstr = g_variant_print (parameters, TRUE);
 	GST_DEBUG("dbus handle method %s %s from %s", method_name, paramstr, sender);
 	g_free (paramstr);
-
-	if (g_strcmp0 (method_name, "enableSource") == 0)
-	{
-		gboolean result;
-		gboolean state;
-		g_variant_get (parameters, "(b)", &state);
-		GST_DEBUG("app->pipeline=%p init state=%i", app->pipeline, state);
-		if (state == TRUE)
-			result = create_source_pipeline(app);
-		else if (state == FALSE)
-			result = destroy_pipeline(app);
-		GST_DEBUG("result=%i", result);
-		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
-	}
-	else if (g_strcmp0 (method_name, "enableRTSP") == 0)
+	if (g_strcmp0 (method_name, "enableRTSP") == 0)
 	{
 		gboolean result = FALSE;
 		if (app->pipeline)
@@ -658,7 +641,6 @@ gboolean create_source_pipeline(App *app)
 
 	app->pipeline = gst_pipeline_new (NULL);
 	app->asrc = gst_element_factory_make ("dreamaudiosource", "dreamaudiosource0");
-
 	app->vsrc = gst_element_factory_make ("dreamvideosource", "dreamvideosource0");
 
 	app->aparse = gst_element_factory_make ("aacparse", NULL);
@@ -690,7 +672,22 @@ gboolean create_source_pipeline(App *app)
 
 	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"create_source_pipeline");
 
-	return gst_element_set_state (app->pipeline, GST_STATE_PAUSED) != GST_STATE_CHANGE_FAILURE;
+	GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_READY);
+	if (sret == GST_STATE_CHANGE_FAILURE)
+		return FALSE;
+	else if (sret == GST_STATE_CHANGE_ASYNC)
+	{
+		GstState state;
+		gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 1*GST_SECOND);
+		GST_INFO_OBJECT(app, "state is %s", gst_element_state_get_name (state));
+		if (state != GST_STATE_READY)
+			return FALSE;
+	}
+	else if (sret == GST_STATE_CHANGE_SUCCESS)
+	{
+		GST_INFO_OBJECT(app, "GST_STATE_CHANGE_SUCCESS");
+			return TRUE;
+	}
 }
 
 DreamRTSPserver *create_rtsp_server(App *app)
@@ -759,6 +756,9 @@ static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo
 gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 upstream_port, gchar *token)
 {
 	GST_DEBUG_OBJECT(app, "enable_tcp_upstream host=%s port=%i token=%s", upstream_host, upstream_port, token);
+
+	if (!app->pipeline)
+		goto fail;
 
 	DreamTCPupstream *t = app->tcp_upstream;
 
@@ -854,8 +854,17 @@ gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 upstream_po
 		else if (sret == GST_STATE_CHANGE_ASYNC)
 		{
 			GstState state;
-			gst_element_get_state (GST_ELEMENT(t->tcpsink), &state, NULL, 2*GST_SECOND);
-			GST_INFO_OBJECT(app, "state is %s", gst_element_state_get_name (state));
+			gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);
+
+			GValue item = G_VALUE_INIT;
+				GstIterator* iter = gst_bin_iterate_elements(GST_BIN(app->pipeline));
+				while(GST_ITERATOR_OK == gst_iterator_next(iter, (GValue*)&item))
+				{
+					GstElement *elem = g_value_get_object(&item);
+					gst_element_get_state (elem, &state, NULL, GST_USECOND);
+					GST_INFO_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (state));
+				}
+				gst_iterator_free(iter);
 			if (state != GST_STATE_PLAYING)
 				goto fail;
 		}
@@ -874,6 +883,13 @@ fail:
 gboolean enable_rtsp_server(App *app, gchar *path, guint32 port, gchar *user, gchar *pass)
 {
 	GST_INFO_OBJECT(app, "enable_rtsp_server path=%s port=%i user=%s pass=%s", path, port, user, pass);
+
+	if (!app->pipeline)
+	{
+		GST_ERROR_OBJECT (app, "failed to enable rtsp server because source pipeline is NULL!");
+		return FALSE;
+	}
+
 	DreamRTSPserver *r = app->rtsp_server;
 	if (!r->enabled)
 	{
@@ -945,18 +961,24 @@ GstRTSPFilterResult client_filter_func (GstRTSPServer *server, GstRTSPClient *cl
 gboolean disable_rtsp_server(App *app)
 {
 	GST_INFO("disable_rtsp_server");
-	if (app->rtsp_server->enabled)
+	if (app->tcp_upstream->enabled)
 	{
-		gst_element_set_state (app->aappsink, GST_STATE_READY);
-		gst_element_set_state (app->vappsink, GST_STATE_READY);
-		gst_bin_remove_many (GST_BIN (app->pipeline), app->aappsink, app->vappsink, NULL);
+		gst_element_set_state (app->aappsink, GST_STATE_NULL);
+		gst_element_set_state (app->vappsink, GST_STATE_NULL);
+		gst_element_unlink_many(app->aappsink, app->vappsink, NULL);
 		if (app->rtsp_server->media)
 		{
 			GList *filter = gst_rtsp_server_client_filter(app->rtsp_server->server, (GstRTSPServerClientFilterFunc) client_filter_func, app);
 		}
+		gst_bin_remove_many (GST_BIN (app->pipeline), app->aappsink, app->vappsink, NULL);
 		gst_rtsp_mount_points_remove_factory (app->rtsp_server->mounts, app->rtsp_server->rtsp_path);
 		app->rtsp_server->enabled = FALSE;
 		return TRUE;
+	}
+	else
+	{
+		destroy_pipeline(app);
+		create_source_pipeline(app);
 	}
 	return FALSE;
 }
@@ -1002,7 +1024,11 @@ gboolean disable_tcp_upstream(App *app)
 		gst_bin_remove_many (GST_BIN (app->pipeline), t->afilter, t->vfilter, t->tsmux, t->payloader, t->tcpsink, NULL);
 	}
 	else
+	{
 		destroy_pipeline(app);
+		create_source_pipeline(app);
+	}
+
 	if (t->enabled)
 	{
 		t->enabled = FALSE;
@@ -1032,9 +1058,15 @@ int main (int argc, char *argv[])
 	App app;
 	guint owner_id;
 
-	memset (&app, 0, sizeof(app));
+	gst_init (0, NULL);
 
-	app.pipeline = NULL;
+	GST_DEBUG_CATEGORY_INIT (dreamrtspserver_debug, "dreamrtspserver",
+			GST_DEBUG_BOLD | GST_DEBUG_FG_YELLOW | GST_DEBUG_BG_BLUE,
+			"Dreambox RTSP server daemon");
+
+	memset (&app, 0, sizeof(app));
+	if (!create_source_pipeline(&app))
+		g_error ("Failed to bring state of source pipeline to READY");
 
 	introspection_data = g_dbus_node_info_new_for_xml (introspection_xml, NULL);
 
@@ -1047,18 +1079,12 @@ int main (int argc, char *argv[])
 			    &app,
 			    NULL);
 
-	gst_init (0, NULL);
-
-	GST_DEBUG_CATEGORY_INIT (dreamrtspserver_debug, "dreamrtspserver",
-			GST_DEBUG_BOLD | GST_DEBUG_FG_YELLOW | GST_DEBUG_BG_BLUE,
-			"Dreambox RTSP server daemon");
+	g_mutex_init (&app.rtsp_mutex);
 
 	app.tcp_upstream = malloc(sizeof(DreamTCPupstream));
 	app.tcp_upstream->enabled = FALSE;
 
 	app.rtsp_server = create_rtsp_server(&app);
-
-	g_mutex_init (&app.rtsp_mutex);
 
 	app.loop = g_main_loop_new (NULL, FALSE);
 
