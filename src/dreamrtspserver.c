@@ -64,6 +64,7 @@ typedef struct {
 	DreamTCPupstream *tcp_upstream;
 	DreamRTSPserver *rtsp_server;
 	GMutex rtsp_mutex;
+	GstClock *clock;
 } App;
 
 static const gchar service[] = "com.dreambox.RTSPserver";
@@ -105,9 +106,9 @@ static const gchar introspection_xml[] =
 
 gboolean create_source_pipeline(App *app);
 DreamRTSPserver *create_rtsp_server(App *app);
-gboolean enable_rtsp_server(App *app, gchar *path, guint32 port, gchar *user, gchar *pass);
+gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gchar *user, const gchar *pass);
 gboolean disable_rtsp_server(App *app);
-gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 upstream_port, gchar *token);
+gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstream_port, const gchar *token);
 gboolean disable_tcp_upstream(App *app);
 gboolean destroy_pipeline(App *app);
 
@@ -351,7 +352,7 @@ static void handle_method_call (GDBusConnection       *connection,
 		{
 			gboolean state;
 			guint32 port;
-			gchar *path, *user, *pass;
+			const gchar *path, *user, *pass;
 
 			g_variant_get (parameters, "(bsuss)", &state, &path, &port, &user, &pass);
 			GST_DEBUG("app->pipeline=%p, enableRTSP state=%i path=%s port=%i user=%s pass=%s", app->pipeline, state, path, port, user, pass);
@@ -360,9 +361,6 @@ static void handle_method_call (GDBusConnection       *connection,
 				result = enable_rtsp_server(app, path, port, user, pass);
 			else if (state == FALSE)
 				result = disable_rtsp_server(app);
-			g_free(path);
-			g_free(user);
-			g_free(pass);
 		}
 		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
 	}
@@ -372,7 +370,7 @@ static void handle_method_call (GDBusConnection       *connection,
 		if (app->pipeline)
 		{
 			gboolean state;
-			gchar *upstream_host, *token;
+			const gchar *upstream_host, *token;
 			guint32 upstream_port;
 
 			g_variant_get (parameters, "(bsus)", &state, &upstream_host, &upstream_port, &token);
@@ -382,8 +380,6 @@ static void handle_method_call (GDBusConnection       *connection,
 				result = enable_tcp_upstream(app, upstream_host, upstream_port, token);
 			else if (state == FALSE && app->tcp_upstream->enabled)
 				result = disable_tcp_upstream(app);
-			g_free(upstream_host);
-			g_free(token);
 		}
 		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
 	}
@@ -535,9 +531,14 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 {
 	App *app = user_data;
-	GstStateChangeReturn ret = gst_element_set_state (app->pipeline, GST_STATE_PAUSED);
-
-	GST_INFO("no more clients -> media unprepared! bringing source pipeline to PAUSED=%i", ret);
+	GST_INFO("no more clients -> media unprepared!");
+	if (!app->tcp_upstream->enabled)
+	{
+		if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_SUCCESS && gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_SUCCESS)
+			GST_INFO("successfully brought sources to PAUSED");
+		else
+			GST_INFO("failed to bring sources to PAUSED!!");
+	}
 	app->rtsp_server->media = NULL;
 }
 
@@ -671,6 +672,9 @@ gboolean create_source_pipeline(App *app)
 	g_signal_connect (G_OBJECT (bus), "message", G_CALLBACK (message_cb), app);
 	gst_object_unref (GST_OBJECT (bus));
 
+	app->clock = gst_system_clock_obtain();
+	gst_pipeline_use_clock(GST_PIPELINE (app->pipeline), app->clock);
+
 	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"create_source_pipeline");
 	g_mutex_unlock (&app->rtsp_mutex);
 	return gst_element_set_state (app->pipeline, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS;
@@ -740,7 +744,7 @@ static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo
 	return GST_PAD_PROBE_REMOVE;
 }
 
-gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 upstream_port, gchar *token)
+gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstream_port, const gchar *token)
 {
 	GST_DEBUG_OBJECT(app, "enable_tcp_upstream host=%s port=%i token=%s", upstream_host, upstream_port, token);
 
@@ -772,8 +776,6 @@ gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 upstream_po
 			goto fail;
 
 		gchar *capsstr;
-
-		strcpy(t->token, token);
 
 		gst_bin_add_many (GST_BIN(app->pipeline), t->afilter, t->vfilter, t->tsmux, t->payloader, t->tcpsink, NULL);
 
@@ -831,8 +833,12 @@ gboolean enable_tcp_upstream(App *app, gchar *upstream_host, guint32 upstream_po
 
 		sinkpad = gst_element_get_static_pad (t->payloader, "sink");
 
-		gst_pad_add_probe (srcpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) inject_authorization, app, NULL);
-		gst_object_unref (sinkpad);
+		if (strlen(token))
+		{
+			strcpy(t->token, token);
+			gst_pad_add_probe (srcpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) inject_authorization, app, NULL);
+			gst_object_unref (sinkpad);
+		}
 
 		GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
 		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_tcp_upstream");
@@ -868,7 +874,7 @@ fail:
 	return FALSE;
 }
 
-gboolean enable_rtsp_server(App *app, gchar *path, guint32 port, gchar *user, gchar *pass)
+gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gchar *user, const gchar *pass)
 {
 	GST_INFO_OBJECT(app, "enable_rtsp_server path=%s port=%i user=%s pass=%s", path, port, user, pass);
 
@@ -894,13 +900,10 @@ gboolean enable_rtsp_server(App *app, gchar *path, guint32 port, gchar *user, gc
 		gst_object_unref (teepad);
 		gst_object_unref (sinkpad);
 
-		gst_element_set_state (app->aappsink, GST_STATE_PLAYING);
-		gst_element_set_state (app->vappsink, GST_STATE_PLAYING);
-
 		gchar *credentials = "";
 		if (strlen(user)) {
-			r->rtsp_user = user;
-			r->rtsp_pass = pass;
+			r->rtsp_user = g_strdup(user);
+			r->rtsp_pass = g_strdup(pass);
 			GstRTSPToken *token;
 			gchar *basic;
 			GstRTSPAuth *auth = gst_rtsp_auth_new ();
@@ -919,14 +922,12 @@ gboolean enable_rtsp_server(App *app, gchar *path, guint32 port, gchar *user, gc
 		gst_rtsp_server_set_service (r->server, r->rtsp_port);
 
 		if (strlen(path))
-		{
 			r->rtsp_path = g_strdup_printf ("%s%s", path[0]=='/' ? "" : "/", path);
-			g_free(path);
-		}
 		else
 			r->rtsp_path = g_strdup(DEFAULT_RTSP_PATH);
 
 		r->mounts = gst_rtsp_server_get_mount_points (r->server);
+		GST_INFO("r->mounts = %" GST_PTR_FORMAT "r->rtsp_path=%s r->factory=% " GST_PTR_FORMAT, r->mounts, r->rtsp_path, r->factory);
 		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_path, g_object_ref(r->factory));
 		g_object_unref (r->mounts);
 		r->clients_list = NULL;
@@ -1033,6 +1034,7 @@ gboolean destroy_pipeline(App *app)
 		GST_INFO_OBJECT(app, "really do destroy_pipeline");
 		gst_element_set_state (app->pipeline, GST_STATE_NULL);
 		gst_object_unref (app->pipeline);
+		gst_object_unref (app->clock);
 		app->pipeline = NULL;
 		return TRUE;
 	}

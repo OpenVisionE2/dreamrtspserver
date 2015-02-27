@@ -28,9 +28,6 @@ class StreamServerControl(object):
 		self._proxy = self._bus.get_object(self.INTERFACE, self.OBJECT)
 		self._interface = dbus.Interface(self._proxy, self.INTERFACE)
 
-	def enableSource(self, state):
-		return self._interface.enableSource(state)
-
 	def enableRTSP(self, state, path='', port=0, user='', pw=''):
 		return self._interface.enableRTSP(state, path, port, user, pw)
 
@@ -77,5 +74,4 @@ class StreamServerControl(object):
 		self._proxy.Set(self.INTERFACE, prop, val, dbus_interface=dbus.PROPERTIES_IFACE)
 
 ctrl = StreamServerControl()
-ctrl.enableSource(True)
-ctrl.enableRTSP(True)
+#ctrl.enableRTSP(True, "stream", 8554)
