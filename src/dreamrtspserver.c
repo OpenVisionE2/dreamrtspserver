@@ -534,7 +534,8 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	GST_INFO("no more clients -> media unprepared!");
 	if (!app->tcp_upstream->enabled)
 	{
-		if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_SUCCESS && gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_SUCCESS)
+		GstStateChangeReturn ret;
+		if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_ASYNC && gst_element_set_state (app->vsrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_ASYNC)
 			GST_INFO("successfully brought sources to PAUSED");
 		else
 			GST_INFO("failed to bring sources to PAUSED!!");
