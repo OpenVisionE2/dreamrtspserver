@@ -37,6 +37,7 @@ typedef struct {
 	GstElement *tsmux;
 	GstElement *tcpsink;
 	GstElement *upstreambin;
+	gulong inject_id;
 	char token[TOKEN_LEN];
 } DreamTCPupstream;
 
@@ -535,10 +536,14 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	if (!app->tcp_upstream->enabled)
 	{
 		GstStateChangeReturn ret;
-		if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_ASYNC && gst_element_set_state (app->vsrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_ASYNC)
-			GST_INFO("successfully brought sources to PAUSED");
-		else
-			GST_INFO("failed to bring sources to PAUSED!!");
+		ret = gst_element_set_state (app->asrc, GST_STATE_PAUSED);
+		GST_INFO("bringing app->asrc pipeline to GST_STATE_PAUSED=%i", ret);
+		ret = gst_element_set_state (app->vsrc, GST_STATE_PAUSED);
+		GST_INFO("bringing app->vsrc pipeline to GST_STATE_PAUSED=%i", ret);
+// 		if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_ASYNC && gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_ASYNC)
+// 			GST_INFO("successfully brought sources to PAUSED");
+// 		else
+// 			GST_INFO("failed to bring sources to PAUSED!!");
 	}
 	app->rtsp_server->media = NULL;
 }
@@ -706,12 +711,12 @@ DreamRTSPserver *create_rtsp_server(App *app)
 
 	g_object_set (G_OBJECT (app->aappsink), "emit-signals", TRUE, NULL);
 	g_object_set (G_OBJECT (app->aappsink), "enable-last-sample", FALSE, NULL);
-	//  g_object_set (G_OBJECT (app->aappsink), "sync", FALSE, NULL);
+// 	g_object_set (G_OBJECT (app->aappsink), "sync", FALSE, NULL);
 	g_signal_connect (app->aappsink, "new-sample", G_CALLBACK (handover_payload), app);
 
 	g_object_set (G_OBJECT (app->vappsink), "emit-signals", TRUE, NULL);
 	g_object_set (G_OBJECT (app->vappsink), "enable-last-sample", FALSE, NULL);
-	//  g_object_set (G_OBJECT (app->vappsink), "sync", FALSE, NULL);
+// 	g_object_set (G_OBJECT (app->vappsink), "sync", FALSE, NULL);
 	g_signal_connect (app->vappsink, "new-sample", G_CALLBACK (handover_payload), app);
 
 	DreamRTSPserver *r = malloc(sizeof(DreamRTSPserver));
@@ -739,6 +744,7 @@ static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo
 	GstPad * srcpad = gst_element_get_static_pad (app->tcp_upstream->payloader, "src");
 	
 	GST_INFO ("injecting authorization on pad %s:%s, created token_buf %" GST_PTR_FORMAT "", GST_DEBUG_PAD_NAME (sinkpad), token_buf);
+	gst_pad_remove_probe (sinkpad, app->tcp_upstream->inject_id);
 	
 	GstFlowReturn pret = gst_pad_push (srcpad, gst_buffer_ref(token_buf));
 	
@@ -750,7 +756,10 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 	GST_DEBUG_OBJECT(app, "enable_tcp_upstream host=%s port=%i token=%s", upstream_host, upstream_port, token);
 
 	if (!app->pipeline)
+	{
+		GST_ERROR_OBJECT (app, "failed to enable upstream because source pipeline is NULL!");
 		goto fail;
+	}
 
 	DreamTCPupstream *t = app->tcp_upstream;
 
@@ -772,9 +781,15 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		g_object_get (t->tcpsink, "host", &check_host, NULL);
 		g_object_get (t->tcpsink, "port", &check_port, NULL);
 		if (g_strcmp0 (upstream_host, check_host))
+		{
+			GST_ERROR_OBJECT (app, "couldn't set upstream_host %s", upstream_host);
 			goto fail;
+		}
 		if (upstream_port != check_port)
+		{
+			GST_ERROR_OBJECT (app, "couldn't set upstream_port %d", upstream_port);
 			goto fail;
+		}
 
 		gchar *capsstr;
 
@@ -789,13 +804,19 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		gst_object_unref (srcpad);
 		gst_object_unref (sinkpad);
 		if (ret != GST_PAD_LINK_OK)
+		{
+			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
 			goto fail;
+		}
 		srcpad = gst_element_get_request_pad (app->vtee, "src_%u");
 // 		sinkpad = gst_element_get_static_pad (t->upstreambin, "vsink");
 		sinkpad = gst_element_get_static_pad (t->vfilter, "sink");
 		ret = gst_pad_link (srcpad, sinkpad);
 		if (ret != GST_PAD_LINK_OK)
+		{
+			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
 			goto fail;
+		}
 		gst_object_unref (srcpad);
 		gst_object_unref (sinkpad);
 
@@ -810,7 +831,11 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		ret = gst_pad_link (srcpad, sinkpad);
 		gst_caps_unref(fltcaps);
 		if (ret != GST_PAD_LINK_OK)
+		{
+			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
 			goto fail;
+		}
+
 		gst_object_unref (srcpad);
 		gst_object_unref (sinkpad);
 
@@ -824,7 +849,11 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		ret = gst_pad_link (srcpad, sinkpad);
 		gst_caps_unref(fltcaps);
 		if (ret != GST_PAD_LINK_OK)
+		{
+			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
 			goto fail;
+		}
+
 		gst_object_unref (srcpad);
 		gst_object_unref (sinkpad);
 
@@ -832,19 +861,28 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			g_error ("Failed to link tsmux to tcpclientsink");
 		}
 
-		sinkpad = gst_element_get_static_pad (t->payloader, "sink");
-
 		if (strlen(token))
 		{
+			sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
 			strcpy(t->token, token);
-			gst_pad_add_probe (srcpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) inject_authorization, app, NULL);
+			t->inject_id = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) inject_authorization, app, NULL);
 			gst_object_unref (sinkpad);
 		}
 
-		GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
+		GstStateChangeReturn sret = gst_element_set_state (t->tcpsink, GST_STATE_READY);
+		if (sret == GST_STATE_CHANGE_FAILURE)
+		{
+			GST_ERROR_OBJECT (app, "failed to set tcpsink to GST_STATE_READY. %s:%d probably refused connection", upstream_host, upstream_port);
+			goto fail;
+		}
+
+		sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
 		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_tcp_upstream");
 		if (sret == GST_STATE_CHANGE_FAILURE)
+		{
+			GST_ERROR_OBJECT (app, "GST_STATE_CHANGE_FAILURE for upstream pipeline");
 			goto fail;
+		}
 		else if (sret == GST_STATE_CHANGE_ASYNC)
 		{
 			GstState state;
@@ -861,7 +899,10 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 				}
 				gst_iterator_free(iter);
 			if (state != GST_STATE_PLAYING)
+			{
+				GST_ERROR_OBJECT (app, "state != GST_STATE_PLAYING");
 				goto fail;
+			}
 		}
 		GST_INFO_OBJECT(app, "enabled tcp upstream, pipeline is PLAYING");
 		t->enabled = TRUE;
@@ -870,7 +911,6 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 	return FALSE;
 
 fail:
-	GST_ERROR_OBJECT (app, "failed to enable tcp upstream!");
 	disable_tcp_upstream(app);
 	return FALSE;
 }
