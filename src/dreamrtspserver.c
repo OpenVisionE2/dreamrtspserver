@@ -56,6 +56,7 @@ typedef struct {
 	GList *clients_list;
 	gchar *rtsp_port;
 	gchar *rtsp_path;
+	guint source_id;
 } DreamRTSPserver;
 
 typedef struct {
@@ -973,7 +974,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		r->clients_list = NULL;
 		r->media = NULL;
 		r->enabled = TRUE;
-		gst_rtsp_server_attach (r->server, NULL);
+		r->source_id = gst_rtsp_server_attach (r->server, NULL);
 		g_print ("dreambox encoder stream ready at rtsp://%s127.0.0.1:%s%s\n", credentials, app->rtsp_server->rtsp_port, app->rtsp_server->rtsp_path);
 		return TRUE;
 	}
@@ -1052,6 +1053,9 @@ gboolean disable_rtsp_server(App *app)
 			g_object_unref(r->mounts);
 		if (r->server)
 			gst_object_unref(r->server);
+		GSource *source = g_main_context_find_source_by_id (g_main_context_default (), r->source_id);
+		g_source_destroy(source);
+		g_source_unref(source);
 		g_free(r->rtsp_user);
 		g_free(r->rtsp_pass);
 		g_free(r->rtsp_port);
