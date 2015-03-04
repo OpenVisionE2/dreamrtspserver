@@ -542,6 +542,7 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	GST_INFO("no more clients -> media unprepared!");
 	stop_rtsp_pipeline(app);
 	app->rtsp_server->media = NULL;
+	app->rtsp_server->aappsrc = app->rtsp_server->vappsrc = NULL;
 }
 
 static void client_closed (GstRTSPClient * client, gpointer user_data)
@@ -582,15 +583,15 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 	App *app = user_data;
 	DreamRTSPserver *r = app->rtsp_server;
 
+	g_mutex_lock (&app->rtsp_mutex);
 	GstAppSrc* appsrc = NULL;
 	if ( appsink == app->vappsink )
 		appsrc = GST_APP_SRC(r->vappsrc);
 	else if ( appsink == app->aappsink )
 		appsrc = GST_APP_SRC(r->aappsrc);
 
-	g_mutex_lock (&app->rtsp_mutex);
+	GstSample *sample = gst_app_sink_pull_sample (GST_APP_SINK (appsink));
 	if (appsrc && g_list_length(r->clients_list) > 0) {
-		GstSample *sample = gst_app_sink_pull_sample (GST_APP_SINK (appsink));
 		GstBuffer *buffer = gst_sample_get_buffer (sample);
 		GstCaps *caps = gst_sample_get_caps (sample);
 
@@ -624,15 +625,15 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 			gst_app_src_set_caps (appsrc, caps);
 		}
 		gst_app_src_push_buffer (appsrc, gst_buffer_ref(buffer));
-		gst_sample_unref (sample);
 	}
 	else
 	{
-		if ( gst_debug_category_get_threshold (dreamrtspserver_debug) >= GST_LEVEL_DEBUG)
+		if ( gst_debug_category_get_threshold (dreamrtspserver_debug) >= GST_LEVEL_LOG)
 			GST_LOG("no rtsp clients, discard payload!");
 		else
 			g_print (".");
 	}
+	gst_sample_unref (sample);
 	g_mutex_unlock (&app->rtsp_mutex);
 
 	return GST_FLOW_OK;
@@ -691,14 +692,12 @@ gboolean create_source_pipeline(App *app)
 	g_object_set (G_OBJECT (app->artspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 	g_object_set (G_OBJECT (app->vrtspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 
-// 	g_object_set (G_OBJECT (app->aappsink), "emit-signals", TRUE, NULL);
-	g_object_set (G_OBJECT (app->aappsink), "emit-signals", FALSE, NULL);
+	g_object_set (G_OBJECT (app->aappsink), "emit-signals", TRUE, NULL);
 	g_object_set (G_OBJECT (app->aappsink), "enable-last-sample", FALSE, NULL);
 // 	g_object_set (G_OBJECT (app->aappsink), "sync", FALSE, NULL);
 	g_signal_connect (app->aappsink, "new-sample", G_CALLBACK (handover_payload), app);
 
-// 	g_object_set (G_OBJECT (app->vappsink), "emit-signals", TRUE, NULL);
-	g_object_set (G_OBJECT (app->vappsink), "emit-signals", FALSE, NULL);
+	g_object_set (G_OBJECT (app->vappsink), "emit-signals", TRUE, NULL);
 	g_object_set (G_OBJECT (app->vappsink), "enable-last-sample", FALSE, NULL);
 // 	g_object_set (G_OBJECT (app->vappsink), "sync", FALSE, NULL);
 	g_signal_connect (app->vappsink, "new-sample", G_CALLBACK (handover_payload), app);
@@ -777,8 +776,8 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		if (!(t->payloader && t->atcpq && t->vtcpq && t->tsmux && t->tcpsink ))
 		g_error ("Failed to create tcp upstream element(s):%s%s%s%s%s", t->payloader?"":"  gdppay", t->atcpq?"":"  audio queue", t->vtcpq?"":"  video queue", t->tsmux?"":"  mpegtsmux", t->tcpsink?"":"  tcpclientsink" );
 
-		g_object_set (G_OBJECT (app->artspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
-		g_object_set (G_OBJECT (app->vrtspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+		g_object_set (G_OBJECT (t->atcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+		g_object_set (G_OBJECT (t->vtcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 
 		g_object_set (t->tcpsink, "host", upstream_host, NULL);
 		g_object_set (t->tcpsink, "port", upstream_port, NULL);
@@ -985,9 +984,6 @@ gboolean start_rtsp_pipeline(App* app)
 		return FALSE;
 	}
 
-	g_object_set (G_OBJECT (app->aappsink), "emit-signals", TRUE, NULL);
-	g_object_set (G_OBJECT (app->vappsink), "emit-signals", TRUE, NULL);
-
 	GstState state;
 	GstStateChangeReturn sret;
 
@@ -1004,9 +1000,6 @@ gboolean start_rtsp_pipeline(App* app)
 gboolean stop_rtsp_pipeline(App* app)
 {
 	GST_INFO_OBJECT(app, "stop_rtsp_pipeline");
-
-	g_object_set (G_OBJECT (app->aappsink), "emit-signals", FALSE, NULL);
-	g_object_set (G_OBJECT (app->vappsink), "emit-signals", FALSE, NULL);
 
 	if (!app->tcp_upstream->enabled)
 		pause_source_pipeline(app);
