@@ -33,6 +33,12 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 #define AAPPSINK "aappsink"
 #define VAPPSINK "vappsink"
 
+typedef enum {
+        INPUT_MODE_LIVE = 0,
+        INPUT_MODE_HDMI_IN = 1,
+        INPUT_MODE_BACKGROUND = 2
+} inputMode;
+
 typedef struct {
 	gboolean enabled;
 	GstElement *atcpq, *vtcpq;
@@ -105,6 +111,7 @@ static const gchar introspection_xml[] =
   "    <property type='i' name='framerate' access='readwrite'/>"
   "    <property type='i' name='width' access='read'/>"
   "    <property type='i' name='height' access='read'/>"
+  "    <property type='i' name='inputMode' access='readwrite'/>"
   "    <property type='s' name='path' access='read'/>"
   "  </interface>"
   "</node>";
@@ -119,6 +126,25 @@ gboolean stop_rtsp_pipeline(App *app);
 gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstream_port, const gchar *token);
 gboolean disable_tcp_upstream(App *app);
 gboolean destroy_pipeline(App *app);
+
+static gboolean gst_set_inputmode(App *app, inputMode input_mode)
+{
+	if (!app->pipeline)
+		return FALSE;
+
+	g_object_set (G_OBJECT (app->asrc), "input_mode", input_mode, NULL);
+	g_object_set (G_OBJECT (app->vsrc), "input_mode", input_mode, NULL);
+
+	inputMode ret1, ret2;
+	g_object_get (G_OBJECT (app->asrc), "input_mode", &ret1, NULL);
+	g_object_get (G_OBJECT (app->vsrc), "input_mode", &ret2, NULL);
+
+	if (input_mode != ret1 || input_mode != ret2)
+		return FALSE;
+
+	GST_DEBUG("set input_mode %d", input_mode);
+	return TRUE;
+}
 
 static gboolean gst_set_framerate(App *app, int value)
 {
@@ -264,6 +290,13 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 		GstState state;
 		return g_variant_new_boolean ( !!app->pipeline  );
 	}
+	else if (g_strcmp0 (property_name, "inputMode") == 0)
+	{
+		inputMode input_mode = -1;
+		if (app->asrc)
+			g_object_get (G_OBJECT (app->asrc), "input_mode", &input_mode, NULL);
+		return g_variant_new_int32 (input_mode);
+	}
 	else if (g_strcmp0 (property_name, "clients") == 0)
 	{
 		return g_variant_new_int32 (g_list_length(app->rtsp_server->clients_list));
@@ -313,7 +346,18 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 	GST_DEBUG("dbus set property %s = %s from %s", property_name, valstr, sender);
 	g_free (valstr);
 
-	if (g_strcmp0 (property_name, "audioBitrate") == 0)
+	if (g_strcmp0 (property_name, "inputMode") == 0)
+	{
+		inputMode input_mode = g_variant_get_int32 (value);
+		if (input_mode >= INPUT_MODE_LIVE && input_mode <= INPUT_MODE_BACKGROUND )
+		{
+			if (gst_set_inputmode(app, input_mode))
+				return 1;
+		}
+		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] can't set input_mode to %d", input_mode);
+		return 0;
+	}
+	else if (g_strcmp0 (property_name, "audioBitrate") == 0)
 	{
 		if (app->asrc)
 		{

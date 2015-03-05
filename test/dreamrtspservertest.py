@@ -4,6 +4,7 @@ import dbus
 class StreamServerControl(object):
 	INTERFACE = 'com.dreambox.RTSPserver'
 	OBJECT = '/com/dreambox/RTSPserver'
+	PROP_INPUT_MODE = 'inputMode'
 	PROP_AUDIO_BITRATE = 'audioBitrate'
 	PROP_VIDEO_BITRATE = 'videoBitrate'
 	PROP_FRAMERATE = 'framerate'
@@ -19,6 +20,8 @@ class StreamServerControl(object):
 	RES_1080 = [1920, 1080]
 	RES_720 = [1280, 720]
 	RES_PAL = [720, 576]
+
+	[INPUT_MODE_LIVE, INPUT_MODE_HDMI_IN, INPUT_MODE_BACKGROUND] = range(3)
 
 	def __init__(self):
 		self.reconnect()
@@ -36,6 +39,13 @@ class StreamServerControl(object):
 
 	def isEnabled(self):
 		return self._getProperty(self.PROP_STATE)
+
+	def getInputMode(self):
+		return self._getProperty(self.PROP_INPUT_MODE)
+
+	def setInputMode(self, bitrate):
+		self._setProperty(self.PROP_INPUT_MODE, bitrate)
+	audioBitrate = property(getInputMode, setInputMode)
 
 	def getAudioBitrate(self):
 		return self._getProperty(self.PROP_AUDIO_BITRATE)
