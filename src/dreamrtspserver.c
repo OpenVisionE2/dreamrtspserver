@@ -122,55 +122,59 @@ gboolean destroy_pipeline(App *app);
 
 static gboolean gst_set_framerate(App *app, int value)
 {
-	GstCaps *caps = NULL;
+	GstCaps *oldcaps, *newcaps;
 	GstStructure *structure;
 	gboolean ret = FALSE;
 
 	if (!app->pipeline)
 		goto out;
 
-	g_object_get (G_OBJECT (app->vsrc), "caps", &caps, NULL);
+	g_object_get (G_OBJECT (app->vsrc), "caps", &oldcaps, NULL);
 
-	if (!GST_IS_CAPS(caps))
+	if (!GST_IS_CAPS(oldcaps))
 		goto out;
 
-	GST_INFO("gst_set_framerate %d old caps %" GST_PTR_FORMAT, value, caps);
+	GST_DEBUG("set framerate %d fps... old caps %" GST_PTR_FORMAT, value, oldcaps);
 
-	structure = gst_caps_steal_structure (caps, 0);
+	newcaps = gst_caps_make_writable(oldcaps);
+	structure = gst_caps_steal_structure (newcaps, 0);
 	if (!structure)
 		goto out;
 
 	if (value)
 		gst_structure_set (structure, "framerate", GST_TYPE_FRACTION, value, 1, NULL);
 
-	gst_caps_append_structure (caps, structure);
-	GST_INFO("new caps %" GST_PTR_FORMAT, caps);
-	g_object_set (G_OBJECT (app->vsrc), "caps", caps, NULL);
+	gst_caps_append_structure (newcaps, structure);
+	GST_INFO("new caps %" GST_PTR_FORMAT, newcaps);
+	g_object_set (G_OBJECT (app->vsrc), "caps", newcaps, NULL);
 	ret = TRUE;
 
 out:
-	if (caps)
-		gst_caps_unref(caps);
+	if (GST_IS_CAPS(oldcaps))
+		gst_caps_unref(oldcaps);
+	if (GST_IS_CAPS(newcaps))
+		gst_caps_unref(newcaps);
 	return ret;
 }
 
 static gboolean gst_set_resolution(App *app, int width, int height)
 {
-	GstCaps *caps = NULL;
+	GstCaps *oldcaps, *newcaps;
 	GstStructure *structure;
 	gboolean ret = FALSE;
 
 	if (!app->pipeline)
 		goto out;
 
-	g_object_get (G_OBJECT (app->vsrc), "caps", &caps, NULL);
+	g_object_get (G_OBJECT (app->vsrc), "caps", &oldcaps, NULL);
 
-	if (!GST_IS_CAPS(caps))
+	if (!GST_IS_CAPS(oldcaps))
 		goto out;
 
-	GST_INFO("old caps %" GST_PTR_FORMAT, caps);
+	GST_DEBUG("set new resolution %ix%i... old caps %" GST_PTR_FORMAT, width, height, oldcaps);
 
-	structure = gst_caps_steal_structure (caps, 0);
+	newcaps = gst_caps_make_writable(oldcaps);
+	structure = gst_caps_steal_structure (newcaps, 0);
 	if (!structure)
 		goto out;
 
@@ -179,14 +183,16 @@ static gboolean gst_set_resolution(App *app, int width, int height)
 		gst_structure_set (structure, "width", G_TYPE_INT, width, NULL);
 		gst_structure_set (structure, "height", G_TYPE_INT, height, NULL);
 	}
-	gst_caps_append_structure (caps, structure);
-	GST_INFO("new caps %" GST_PTR_FORMAT, caps);
-	g_object_set (G_OBJECT (app->vsrc), "caps", caps, NULL);
+	gst_caps_append_structure (newcaps, structure);
+	GST_INFO("new caps %" GST_PTR_FORMAT, newcaps);
+	g_object_set (G_OBJECT (app->vsrc), "caps", newcaps, NULL);
 	ret = TRUE;
 
 out:
-	if (caps)
-		gst_caps_unref(caps);
+	if (GST_IS_CAPS(oldcaps))
+		gst_caps_unref(oldcaps);
+	if (GST_IS_CAPS(newcaps))
+		gst_caps_unref(newcaps);
 	return ret;
 }
 
@@ -209,7 +215,7 @@ static gboolean gst_get_capsprop(App *app, const gchar* element_name, const gcha
 	if (!GST_IS_CAPS(caps))
 		goto out;
 
-	GST_INFO("current caps %" GST_PTR_FORMAT, caps);
+	GST_DEBUG("current caps %" GST_PTR_FORMAT, caps);
 
 	structure = gst_caps_get_structure (caps, 0);
 	if (!structure)
@@ -465,7 +471,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 
 			if (GST_MESSAGE_SRC(message) == GST_OBJECT(app->pipeline))
 			{
-				GST_INFO_OBJECT(app, "state transition %s -> %s", gst_element_state_get_name(old_state), gst_element_state_get_name(new_state));
+				GST_DEBUG_OBJECT(app, "state transition %s -> %s", gst_element_state_get_name(old_state), gst_element_state_get_name(new_state));
 
 				GstStateChange transition = (GstStateChange)GST_STATE_TRANSITION(old_state, new_state);
 
@@ -608,7 +614,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 			{
 				r->rtsp_start_pts = GST_BUFFER_PTS (buffer);
 				r->rtsp_start_dts = GST_BUFFER_DTS (buffer);
-				GST_INFO("frame is IFRAME! set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), appsrc);
+				GST_DEBUG("frame is IFRAME! set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), appsrc);
 			}
 		}
 		if (GST_BUFFER_PTS (buffer) < r->rtsp_start_pts)
@@ -887,7 +893,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 					GstElement *elem = g_value_get_object(&item);
 					gst_element_get_state (elem, &state, NULL, GST_USECOND);
 					if ( state != GST_STATE_PLAYING)
-						GST_INFO_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (state));
+						GST_DEBUG_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (state));
 				}
 				gst_iterator_free(iter);
 			if (state != GST_STATE_PLAYING)
@@ -975,7 +981,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 
 gboolean start_rtsp_pipeline(App* app)
 {
-	GST_INFO_OBJECT(app, "start_rtsp_pipeline");
+	GST_DEBUG_OBJECT(app, "start_rtsp_pipeline");
 
 	DreamRTSPserver *r = app->rtsp_server;
 	if (!r->enabled)
@@ -1003,7 +1009,6 @@ gboolean stop_rtsp_pipeline(App* app)
 
 	if (!app->tcp_upstream->enabled)
 		pause_source_pipeline(app);
-// 		g_mutex_unlock (&app->rtsp_mutex);
 	return TRUE;
 }
 
@@ -1020,16 +1025,18 @@ gboolean pause_source_pipeline(App* app)
 GstRTSPFilterResult client_filter_func (GstRTSPServer *server, GstRTSPClient *client, gpointer user_data)
 {
 	App *app = user_data;
-	GST_INFO("client_filter_func %" GST_PTR_FORMAT "  (number of clients: %i)", client, g_list_length(app->rtsp_server->clients_list));
+	int ret = g_signal_handlers_disconnect_by_func(client, (GCallback) client_closed, app);
+	GST_INFO("client_filter_func %" GST_PTR_FORMAT "  (number of clients: %i). disconnected %i callback handlers", client, g_list_length(app->rtsp_server->clients_list), ret);
 	return GST_RTSP_FILTER_REMOVE;
 }
 
 gboolean disable_rtsp_server(App *app)
 {
 	DreamRTSPserver *r = app->rtsp_server;
-	GST_INFO("disable_rtsp_server %p", r->server);
+	GST_DEBUG("disable_rtsp_server %p", r->server);
 	if (r->enabled)
 	{
+		g_mutex_lock (&app->rtsp_mutex);
 		if (app->rtsp_server->media)
 		{
 			GList *filter = gst_rtsp_server_client_filter(app->rtsp_server->server, (GstRTSPServerClientFilterFunc) client_filter_func, app);
@@ -1046,7 +1053,6 @@ gboolean disable_rtsp_server(App *app)
 		g_free(r->rtsp_pass);
 		g_free(r->rtsp_port);
 		g_free(r->rtsp_path);
-		g_mutex_lock (&app->rtsp_mutex);
 		app->rtsp_server->enabled = FALSE;
 		g_mutex_unlock (&app->rtsp_mutex);
 		GST_INFO("rtsp_server disabled!");
@@ -1057,69 +1063,68 @@ gboolean disable_rtsp_server(App *app)
 
 gboolean disable_tcp_upstream(App *app)
 {
-	GST_INFO("disable_tcp_upstream");
-	gboolean ret = FALSE;
+	GST_DEBUG("disable_tcp_upstream");
 	DreamTCPupstream *t = app->tcp_upstream;
-	if (app->rtsp_server->enabled)
-	{
-		gst_element_set_state (t->tsmux, GST_STATE_NULL);
-		gst_element_set_state (t->payloader, GST_STATE_NULL);
-		gst_element_set_state (t->tcpsink, GST_STATE_NULL);
-
-		GstPad *teepad, *sinkpad;
-		sinkpad = gst_element_get_static_pad (t->atcpq, "sink");
-		teepad = gst_pad_get_peer(sinkpad);
-		gst_pad_unlink (teepad, sinkpad);
-		gst_element_release_request_pad (app->atee, teepad);
-		gst_object_unref (teepad);
-		gst_object_unref (sinkpad);
-		sinkpad = gst_element_get_static_pad (t->vtcpq, "sink");
-		teepad = gst_pad_get_peer(sinkpad);
-		gst_pad_unlink (teepad, sinkpad);
-		gst_element_release_request_pad (app->vtee, teepad);
-		gst_object_unref (teepad);
-		gst_object_unref (sinkpad);
-		gst_element_unlink_many(t->tsmux, t->payloader, t->tcpsink, NULL);
-		gst_object_ref(t->atcpq);
-		gst_object_ref(t->vtcpq);
-		gst_object_ref(t->tsmux);
-		gst_object_ref(t->payloader);
-		gst_object_ref(t->tcpsink);
-		gst_bin_remove_many (GST_BIN (app->pipeline), t->atcpq, t->vtcpq, t->tsmux, t->payloader, t->tcpsink, NULL);
-	}
-	else
-	{
-		pause_source_pipeline(app);
-	}
-
 	if (t->enabled)
 	{
+		if (app->rtsp_server->enabled)
+		{
+			gst_element_set_state (t->tsmux, GST_STATE_NULL);
+			gst_element_set_state (t->payloader, GST_STATE_NULL);
+			gst_element_set_state (t->tcpsink, GST_STATE_NULL);
+
+			GstPad *teepad, *sinkpad;
+			sinkpad = gst_element_get_static_pad (t->atcpq, "sink");
+			teepad = gst_pad_get_peer(sinkpad);
+			gst_pad_unlink (teepad, sinkpad);
+			gst_element_release_request_pad (app->atee, teepad);
+			gst_object_unref (teepad);
+			gst_object_unref (sinkpad);
+			sinkpad = gst_element_get_static_pad (t->vtcpq, "sink");
+			teepad = gst_pad_get_peer(sinkpad);
+			gst_pad_unlink (teepad, sinkpad);
+			gst_element_release_request_pad (app->vtee, teepad);
+			gst_object_unref (teepad);
+			gst_object_unref (sinkpad);
+			gst_element_unlink_many(t->tsmux, t->payloader, t->tcpsink, NULL);
+			gst_object_ref(t->atcpq);
+			gst_object_ref(t->vtcpq);
+			gst_object_ref(t->tsmux);
+			gst_object_ref(t->payloader);
+			gst_object_ref(t->tcpsink);
+			gst_bin_remove_many (GST_BIN (app->pipeline), t->atcpq, t->vtcpq, t->tsmux, t->payloader, t->tcpsink, NULL);
+		}
+		else
+			pause_source_pipeline(app);
+
+		GST_INFO("tcp_upstream disabled!");
 		t->enabled = FALSE;
-		ret = TRUE;
+		return TRUE;
 	}
-	return ret;
+	return FALSE;
 }
 
 gboolean destroy_pipeline(App *app)
 {
-	GST_INFO_OBJECT(app, "destroy_pipeline @%p", app->pipeline);
+	GST_DEBUG_OBJECT(app, "destroy_pipeline @%p", app->pipeline);
 	if (app->pipeline)
 	{
 		GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_NULL);
-		GST_INFO_OBJECT(app, "really do destroy_pipeline sret=%i", sret);
 		if (sret == GST_STATE_CHANGE_ASYNC)
 		{
 			GstState state;
 			gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);
-			GST_INFO_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", app->pipeline, gst_element_state_get_name (state));
+			if (state != GST_STATE_NULL)
+				GST_INFO_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", app->pipeline, gst_element_state_get_name (state));
 		}
 		gst_object_unref (app->pipeline);
 		gst_object_unref (app->clock);
+		GST_INFO_OBJECT(app, "source pipeline destroyed");
 		app->pipeline = NULL;
 		return TRUE;
 	}
 	else
-		GST_INFO_OBJECT(app, "don't destroy_pipeline");
+		GST_INFO_OBJECT(app, "don't destroy inexistant pipeline");
 	return FALSE;
 }
 
@@ -1176,5 +1181,5 @@ int main (int argc, char *argv[])
 	g_bus_unown_name (owner_id);
 	g_dbus_node_info_unref (introspection_data);
 
-	GST_INFO_OBJECT(&app, "exit");
+	GST_DEBUG_OBJECT(&app, "exit");
 }
