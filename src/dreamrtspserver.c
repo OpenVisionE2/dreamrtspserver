@@ -817,6 +817,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 
 	if (!t->enabled)
 	{
+		t->enabled = TRUE;
 		t->atcpq = gst_element_factory_make ("queue", NULL);
 		t->vtcpq = gst_element_factory_make ("queue", NULL);
 		t->tsmux = gst_element_factory_make ("mpegtsmux", NULL);
@@ -947,13 +948,13 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			}
 		}
 		GST_INFO_OBJECT(app, "enabled tcp upstream, pipeline is PLAYING");
-		t->enabled = TRUE;
 		return TRUE;
 	}
 	return FALSE;
 
 fail:
 	disable_tcp_upstream(app);
+	t->enabled = FALSE;
 	return FALSE;
 }
 
@@ -1111,34 +1112,29 @@ gboolean disable_tcp_upstream(App *app)
 	DreamTCPupstream *t = app->tcp_upstream;
 	if (t->enabled)
 	{
-		if (app->rtsp_server->enabled)
-		{
-			gst_element_set_state (t->tsmux, GST_STATE_NULL);
-			gst_element_set_state (t->payloader, GST_STATE_NULL);
-			gst_element_set_state (t->tcpsink, GST_STATE_NULL);
+		gst_element_set_state (t->tsmux, GST_STATE_NULL);
+		gst_element_set_state (t->atcpq, GST_STATE_NULL);
+		gst_element_set_state (t->vtcpq, GST_STATE_NULL);
+		gst_element_set_state (t->payloader, GST_STATE_NULL);
+		gst_element_set_state (t->tcpsink, GST_STATE_NULL);
 
-			GstPad *teepad, *sinkpad;
-			sinkpad = gst_element_get_static_pad (t->atcpq, "sink");
-			teepad = gst_pad_get_peer(sinkpad);
-			gst_pad_unlink (teepad, sinkpad);
-			gst_element_release_request_pad (app->atee, teepad);
-			gst_object_unref (teepad);
-			gst_object_unref (sinkpad);
-			sinkpad = gst_element_get_static_pad (t->vtcpq, "sink");
-			teepad = gst_pad_get_peer(sinkpad);
-			gst_pad_unlink (teepad, sinkpad);
-			gst_element_release_request_pad (app->vtee, teepad);
-			gst_object_unref (teepad);
-			gst_object_unref (sinkpad);
-			gst_element_unlink_many(t->tsmux, t->payloader, t->tcpsink, NULL);
-			gst_object_ref(t->atcpq);
-			gst_object_ref(t->vtcpq);
-			gst_object_ref(t->tsmux);
-			gst_object_ref(t->payloader);
-			gst_object_ref(t->tcpsink);
-			gst_bin_remove_many (GST_BIN (app->pipeline), t->atcpq, t->vtcpq, t->tsmux, t->payloader, t->tcpsink, NULL);
-		}
-		else
+		GstPad *teepad, *sinkpad;
+		sinkpad = gst_element_get_static_pad (t->atcpq, "sink");
+		teepad = gst_pad_get_peer(sinkpad);
+		gst_pad_unlink (teepad, sinkpad);
+		gst_element_release_request_pad (app->atee, teepad);
+		gst_object_unref (teepad);
+		gst_object_unref (sinkpad);
+		sinkpad = gst_element_get_static_pad (t->vtcpq, "sink");
+		teepad = gst_pad_get_peer(sinkpad);
+		gst_pad_unlink (teepad, sinkpad);
+		gst_element_release_request_pad (app->vtee, teepad);
+		gst_object_unref (teepad);
+		gst_object_unref (sinkpad);
+		gst_element_unlink_many(t->tsmux, t->payloader, t->tcpsink, NULL);
+		gst_bin_remove_many (GST_BIN (app->pipeline), t->atcpq, t->vtcpq, t->tsmux, t->payloader, t->tcpsink, NULL);
+
+		if (!app->rtsp_server->enabled)
 			pause_source_pipeline(app);
 
 		GST_INFO("tcp_upstream disabled!");
