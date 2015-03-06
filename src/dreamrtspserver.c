@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <gio/gio.h>
+#include <glib-unix.h>
 #include <gst/gst.h>
 #include <gst/app/app.h>
 #include <gst/rtsp-server/rtsp-server.h>
@@ -47,7 +48,7 @@ typedef struct {
 	GstElement *tcpsink;
 	GstElement *upstreambin;
 	gulong inject_id;
-	char token[TOKEN_LEN];
+	char token[TOKEN_LEN+1];
 } DreamTCPupstream;
 
 typedef struct {
@@ -257,13 +258,13 @@ static gboolean gst_get_capsprop(App *app, const gchar* element_name, const gcha
 	}
 	else if ((g_strcmp0 (prop_name, "width") == 0 || g_strcmp0 (prop_name, "height") == 0) && value)
 	{
-		if (!gst_structure_get_int (structure, prop_name, value))
+		if (!gst_structure_get_uint (structure, prop_name, (guint*)value))
 			*value = 0;
 	}
 	else
 		goto out;
 
-	GST_INFO("%s.%s = %i", element_name, prop_name, *value);
+	GST_DEBUG("%s.%s = %i", element_name, prop_name, *value);
 	ret = TRUE;
 out:
 	if (element)
@@ -287,8 +288,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 
 	if (g_strcmp0 (property_name, "state") == 0)
 	{
-		GstState state;
-		return g_variant_new_boolean ( !!app->pipeline  );
+		return g_variant_new_boolean (!!app->pipeline);
 	}
 	else if (g_strcmp0 (property_name, "inputMode") == 0)
 	{
@@ -412,7 +412,7 @@ static void handle_method_call (GDBusConnection       *connection,
 			guint32 port;
 			const gchar *path, *user, *pass;
 
-			g_variant_get (parameters, "(bsuss)", &state, &path, &port, &user, &pass);
+			g_variant_get (parameters, "(b&su&s&s)", &state, &path, &port, &user, &pass);
 			GST_DEBUG("app->pipeline=%p, enableRTSP state=%i path=%s port=%i user=%s pass=%s", app->pipeline, state, path, port, user, pass);
 
 			if (state == TRUE)
@@ -431,7 +431,7 @@ static void handle_method_call (GDBusConnection       *connection,
 			const gchar *upstream_host, *token;
 			guint32 upstream_port;
 
-			g_variant_get (parameters, "(bsus)", &state, &upstream_host, &upstream_port, &token);
+			g_variant_get (parameters, "(b&su&s)", &state, &upstream_host, &upstream_port, &token);
 			GST_DEBUG("app->pipeline=%p, enableUpstream state=%i host=%s port=%i token=%s", app->pipeline, state, upstream_host, upstream_port, token);
 
 			if (state == TRUE && !app->tcp_upstream->enabled)
@@ -468,19 +468,9 @@ static void on_bus_acquired (GDBusConnection *connection,
 		handle_set_property
 	};
 
-	guint registration_id;
 	GError *error = NULL;
-
 	GST_DEBUG ("aquired dbus (\"%s\" @ %p)", name, connection);
-
-	registration_id =
-	g_dbus_connection_register_object (connection,
-					   object_name,
-				    introspection_data->interfaces[0],
-				    &interface_vtable,
-				    user_data,    // Optional user data
-				    NULL,    // Func. for freeing user data
-				    &error);
+	g_dbus_connection_register_object (connection, object_name, introspection_data->interfaces[0], &interface_vtable, user_data, NULL, &error);
 } // on_bus_acquired
 
 static void on_name_acquired (GDBusConnection *connection,
@@ -494,7 +484,7 @@ static void on_name_lost (GDBusConnection *connection,
 			  const gchar     *name,
 			  gpointer         user_data)
 {
-	App *app = user_data;
+// 	App *app = user_data;
 
 	GST_WARNING ("lost dbus name (\"%s\" @ %p)", name, connection);
 	//  g_main_loop_quit (app->loop);
@@ -591,8 +581,10 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	App *app = user_data;
 	GST_INFO("no more clients -> media unprepared!");
 	stop_rtsp_pipeline(app);
+	g_mutex_lock (&app->rtsp_mutex);
 	app->rtsp_server->media = NULL;
 	app->rtsp_server->aappsrc = app->rtsp_server->vappsrc = NULL;
+	g_mutex_unlock (&app->rtsp_mutex);
 }
 
 static void client_closed (GstRTSPClient * client, gpointer user_data)
@@ -791,14 +783,12 @@ gboolean create_source_pipeline(App *app)
 static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
 {
 	App *app = user_data;
-	GError *err = NULL;
 	GstBuffer *token_buf = gst_buffer_new_wrapped (app->tcp_upstream->token, TOKEN_LEN);
 	GstPad * srcpad = gst_element_get_static_pad (app->tcp_upstream->payloader, "src");
-	
+
 	GST_INFO ("injecting authorization on pad %s:%s, created token_buf %" GST_PTR_FORMAT "", GST_DEBUG_PAD_NAME (sinkpad), token_buf);
 	gst_pad_remove_probe (sinkpad, app->tcp_upstream->inject_id);
-	
-	GstFlowReturn pret = gst_pad_push (srcpad, gst_buffer_ref(token_buf));
+	gst_pad_push (srcpad, gst_buffer_ref(token_buf));
 	
 	return GST_PAD_PROBE_REMOVE;
 }
@@ -838,6 +828,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		g_object_get (t->tcpsink, "port", &check_port, NULL);
 		if (g_strcmp0 (upstream_host, check_host))
 		{
+			g_free (check_host);
 			GST_ERROR_OBJECT (app, "couldn't set upstream_host %s", upstream_host);
 			goto fail;
 		}
@@ -846,8 +837,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			GST_ERROR_OBJECT (app, "couldn't set upstream_port %d", upstream_port);
 			goto fail;
 		}
-
-		gchar *capsstr;
+		g_free (check_host);
 
 		gst_bin_add_many (GST_BIN(app->pipeline), t->atcpq, t->vtcpq, t->tsmux, t->payloader, t->tcpsink, NULL);
 
@@ -958,6 +948,18 @@ fail:
 	return FALSE;
 }
 
+DreamRTSPserver *create_rtsp_server(App *app)
+{
+	DreamRTSPserver *r = malloc(sizeof(DreamRTSPserver));
+	r->enabled = FALSE;
+	r->server = NULL;
+	r->factory = NULL;
+	r->media = NULL;
+	r->aappsrc = r->vappsrc = NULL;
+	r->clients_list = NULL;
+	return r;
+}
+
 gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gchar *user, const gchar *pass)
 {
 	GST_INFO_OBJECT(app, "enable_rtsp_server path=%s port=%i user=%s pass=%s", path, port, user, pass);
@@ -1014,8 +1016,6 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 
 		r->mounts = gst_rtsp_server_get_mount_points (r->server);
 		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_path, g_object_ref(r->factory));
-		r->clients_list = NULL;
-		r->media = NULL;
 		r->enabled = TRUE;
 		r->source_id = gst_rtsp_server_attach (r->server, NULL);
 		g_print ("dreambox encoder stream ready at rtsp://%s127.0.0.1:%s%s\n", credentials, app->rtsp_server->rtsp_port, app->rtsp_server->rtsp_path);
@@ -1035,9 +1035,7 @@ gboolean start_rtsp_pipeline(App* app)
 		return FALSE;
 	}
 
-	GstState state;
 	GstStateChangeReturn sret;
-
 	sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
 	if (sret == GST_STATE_CHANGE_FAILURE)
 	{
@@ -1060,19 +1058,55 @@ gboolean stop_rtsp_pipeline(App* app)
 gboolean pause_source_pipeline(App* app)
 {
 	GST_INFO_OBJECT(app, "pause_source_pipeline");
-	GstStateChangeReturn ret;
 	if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_NO_PREROLL && gst_element_set_state (app->vsrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_NO_PREROLL)
 		return TRUE;
-	GST_WARNING("can't set sources to GST_STATE_PAUSED!", ret);
+	GST_WARNING("can't set sources to GST_STATE_PAUSED!");
 	return FALSE;
 }
 
-GstRTSPFilterResult client_filter_func (GstRTSPServer *server, GstRTSPClient *client, gpointer user_data)
+GstRTSPFilterResult remove_media_filter_func (GstRTSPSession * sess, GstRTSPSessionMedia * session_media, gpointer user_data)
 {
 	App *app = user_data;
+	GstRTSPFilterResult res = GST_RTSP_FILTER_REF;
+	GstRTSPMedia *media;
+	media = gst_rtsp_session_media_get_media (session_media);
+	g_mutex_lock (&app->rtsp_mutex);
+	if (media == app->rtsp_server->media) {
+		GST_DEBUG_OBJECT (app, "matching RTSP media %p in filter, removing...", media);
+		res = GST_RTSP_FILTER_REMOVE;
+	}
+	g_mutex_unlock (&app->rtsp_mutex);
+	return res;
+}
+
+GstRTSPFilterResult remove_session_filter_func (GstRTSPClient *client, GstRTSPSession * sess, gpointer user_data)
+{
+	App *app = user_data;
+	GList *media_filter_res;
+	GstRTSPFilterResult res = GST_RTSP_FILTER_REF;
+	media_filter_res = gst_rtsp_session_filter (sess, remove_media_filter_func, app);
+	if (g_list_length (media_filter_res) == 0) {
+		GST_DEBUG_OBJECT (app, "no more media for session %p, removing...", sess);
+		res = GST_RTSP_FILTER_REMOVE;
+	}
+	g_list_free (media_filter_res);
+	return res;
+}
+
+GstRTSPFilterResult remove_client_filter_func (GstRTSPServer *server, GstRTSPClient *client, gpointer user_data)
+{
+	App *app = user_data;
+	GList *session_filter_res;
+	GstRTSPFilterResult res = GST_RTSP_FILTER_KEEP;
 	int ret = g_signal_handlers_disconnect_by_func(client, (GCallback) client_closed, app);
 	GST_INFO("client_filter_func %" GST_PTR_FORMAT "  (number of clients: %i). disconnected %i callback handlers", client, g_list_length(app->rtsp_server->clients_list), ret);
-	return GST_RTSP_FILTER_REMOVE;
+	session_filter_res = gst_rtsp_client_session_filter (client, remove_session_filter_func, app);
+	if (g_list_length (session_filter_res) == 0) {
+		GST_DEBUG_OBJECT (app, "no more sessions for client %p, removing...", app);
+		res = GST_RTSP_FILTER_REMOVE;
+	}
+	g_list_free (session_filter_res);
+	return res;
 }
 
 gboolean disable_rtsp_server(App *app)
@@ -1081,19 +1115,18 @@ gboolean disable_rtsp_server(App *app)
 	GST_DEBUG("disable_rtsp_server %p", r->server);
 	if (r->enabled)
 	{
-		g_mutex_lock (&app->rtsp_mutex);
 		if (app->rtsp_server->media)
-		{
-			GList *filter = gst_rtsp_server_client_filter(app->rtsp_server->server, (GstRTSPServerClientFilterFunc) client_filter_func, app);
-		}
+			gst_rtsp_server_client_filter(app->rtsp_server->server, (GstRTSPServerClientFilterFunc) remove_client_filter_func, app);
+		g_mutex_lock (&app->rtsp_mutex);
 		gst_rtsp_mount_points_remove_factory (app->rtsp_server->mounts, app->rtsp_server->rtsp_path);
+		GSource *source = g_main_context_find_source_by_id (g_main_context_default (), r->source_id);
+		g_source_destroy(source);
+// 		g_source_unref(source);
+// 		GST_DEBUG("disable_rtsp_server source unreffed");
 		if (r->mounts)
 			g_object_unref(r->mounts);
 		if (r->server)
 			gst_object_unref(r->server);
-		GSource *source = g_main_context_find_source_by_id (g_main_context_default (), r->source_id);
-		g_source_destroy(source);
-		g_source_unref(source);
 		g_free(r->rtsp_user);
 		g_free(r->rtsp_pass);
 		g_free(r->rtsp_port);
@@ -1168,6 +1201,13 @@ gboolean destroy_pipeline(App *app)
 	return FALSE;
 }
 
+gboolean quit_signal(gpointer loop)
+{
+	GST_INFO_OBJECT(loop, "caught SIGINT");
+	g_main_loop_quit((GMainLoop*)loop);
+	return FALSE;
+}
+
 int main (int argc, char *argv[])
 {
 	App app;
@@ -1180,6 +1220,7 @@ int main (int argc, char *argv[])
 			"Dreambox RTSP server daemon");
 
 	memset (&app, 0, sizeof(app));
+	g_mutex_init (&app.rtsp_mutex);
 	if (!create_source_pipeline(&app))
 		g_error ("Failed to bring state of source pipeline to READY");
 
@@ -1194,15 +1235,13 @@ int main (int argc, char *argv[])
 			    &app,
 			    NULL);
 
-	g_mutex_init (&app.rtsp_mutex);
-
 	app.tcp_upstream = malloc(sizeof(DreamTCPupstream));
 	app.tcp_upstream->enabled = FALSE;
 
-	app.rtsp_server = malloc(sizeof(DreamRTSPserver));
-	app.rtsp_server->enabled = FALSE;
+	app.rtsp_server = create_rtsp_server(&app);
 
 	app.loop = g_main_loop_new (NULL, FALSE);
+	g_unix_signal_add(SIGINT, quit_signal, app.loop);
 
 	g_main_loop_run (app.loop);
 
@@ -1210,16 +1249,18 @@ int main (int argc, char *argv[])
 
 	g_main_loop_unref (app.loop);
 
-	g_mutex_clear (&app.rtsp_mutex);
-
 	free(app.tcp_upstream);
 	if (app.rtsp_server->enabled)
 		disable_rtsp_server(&app);
-	g_list_free (app.rtsp_server->clients_list);
+	if (app.rtsp_server->clients_list)
+		g_list_free (app.rtsp_server->clients_list);
 	free(app.rtsp_server);
+
+	g_mutex_clear (&app.rtsp_mutex);
 
 	g_bus_unown_name (owner_id);
 	g_dbus_node_info_unref (introspection_data);
 
-	GST_DEBUG_OBJECT(&app, "exit");
+	GST_DEBUG("exit");
+	return 0;
 }
