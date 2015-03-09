@@ -563,6 +563,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 				GST_ERROR ("ERROR: from element %s: %s", name, err->message);
 				if (debug != NULL)
 					GST_ERROR ("Additional debug info: %s", debug);
+				GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"dreamrtspserver-error");
 			}
 			g_error_free (err);
 			g_free (debug);
@@ -1089,7 +1090,7 @@ gboolean stop_rtsp_pipeline(App* app)
 {
 	GST_INFO_OBJECT(app, "stop_rtsp_pipeline");
 
-	if (!app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
+	if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
 		pause_source_pipeline(app);
 	return TRUE;
 }
@@ -1206,7 +1207,7 @@ gboolean disable_tcp_upstream(App *app)
 		gst_element_unlink_many(t->tsmux, t->payloader, t->tcpsink, NULL);
 		gst_bin_remove_many (GST_BIN (app->pipeline), t->atcpq, t->vtcpq, t->tsmux, t->payloader, t->tcpsink, NULL);
 
-		if (!app->rtsp_server->state == RTSP_STATE_DISABLED)
+		if (app->rtsp_server->state == RTSP_STATE_DISABLED)
 			pause_source_pipeline(app);
 
 		GST_INFO("tcp_upstream disabled!");
