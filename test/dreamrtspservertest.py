@@ -10,7 +10,8 @@ class StreamServerControl(object):
 	PROP_FRAMERATE = 'framerate'
 	PROP_XRES = 'width'
 	PROP_YRES = 'height'
-	PROP_STATE = 'state'
+	PROP_RTSP_STATE = 'rtspState'
+	PROP_UPSTREAM_STATE = 'upstreamState'
 
 	FRAME_RATE_25 = 25
 	FRAME_RATE_30 = 30
@@ -22,6 +23,8 @@ class StreamServerControl(object):
 	RES_PAL = [720, 576]
 
 	[INPUT_MODE_LIVE, INPUT_MODE_HDMI_IN, INPUT_MODE_BACKGROUND] = range(3)
+	[RTSP_STATE_DISABLED, RTSP_STATE_IDLE, RTSP_STATE_RUNNING] = range(3)
+	[UPSTREAM_STATE_DISABLED, UPSTREAM_STATE_CONNECTING, UPSTREAM_STATE_RUNNING] = range(3)
 
 	def __init__(self):
 		self.reconnect()
@@ -37,8 +40,11 @@ class StreamServerControl(object):
 	def enableUpstream(self, state, host='', aport=0, vport=0):
 		return self._interface.enableUpstream(state, host, aport, vport)
 
-	def isEnabled(self):
-		return self._getProperty(self.PROP_STATE)
+	def getRTSPState(self):
+		return self._getProperty(self.PROP_RTSP_STATE)
+
+	def getUpstreamState(self):
+		return self._getProperty(self.PROP_UPSTREAM_STATE)
 
 	def getInputMode(self):
 		return self._getProperty(self.PROP_INPUT_MODE)

@@ -40,8 +40,19 @@ typedef enum {
         INPUT_MODE_BACKGROUND = 2
 } inputMode;
 
+typedef enum {
+        RTSP_STATE_DISABLED = 0,
+        RTSP_STATE_IDLE = 1,
+        RTSP_STATE_RUNNING = 2
+} rtspState;
+
+typedef enum {
+        UPSTREAM_STATE_DISABLED = 0,
+        UPSTREAM_STATE_CONNECTING = 1,
+        UPSTREAM_STATE_RUNNING = 2
+} upstreamState;
+
 typedef struct {
-	gboolean enabled;
 	GstElement *atcpq, *vtcpq;
 	GstElement *payloader;
 	GstElement *tsmux;
@@ -49,10 +60,10 @@ typedef struct {
 	GstElement *upstreambin;
 	gulong inject_id;
 	char token[TOKEN_LEN+1];
+	upstreamState state;
 } DreamTCPupstream;
 
 typedef struct {
-	gboolean enabled;
 	GstRTSPServer *server;
 	GstRTSPMountPoints *mounts;
 	GstRTSPMediaFactory *factory;
@@ -64,6 +75,7 @@ typedef struct {
 	gchar *rtsp_port;
 	gchar *rtsp_path;
 	guint source_id;
+	rtspState state;
 } DreamRTSPserver;
 
 typedef struct {
@@ -105,7 +117,8 @@ static const gchar introspection_xml[] =
   "      <arg type='i' name='width' direction='in'/>"
   "      <arg type='i' name='height' direction='in'/>"
   "    </method>"
-  "    <property type='b' name='state' access='read'/>"
+  "    <property type='i' name='rtspState' access='read'/>"
+  "    <property type='i' name='upstreamState' access='read'/>"
   "    <property type='i' name='clients' access='read'/>"
   "    <property type='i' name='audioBitrate' access='readwrite'/>"
   "    <property type='i' name='videoBitrate' access='readwrite'/>"
@@ -286,9 +299,15 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 
 	GST_DEBUG("dbus get property %s from %s", property_name, sender);
 
-	if (g_strcmp0 (property_name, "state") == 0)
+	if (g_strcmp0 (property_name, "rtspState") == 0)
 	{
-		return g_variant_new_boolean (!!app->pipeline);
+		if (app->rtsp_server)
+			return g_variant_new_int32 (app->rtsp_server->state);
+	}
+	if (g_strcmp0 (property_name, "upstreamState") == 0)
+	{
+		if (app->tcp_upstream)
+			return g_variant_new_int32 (app->tcp_upstream->state);
 	}
 	else if (g_strcmp0 (property_name, "inputMode") == 0)
 	{
@@ -434,9 +453,9 @@ static void handle_method_call (GDBusConnection       *connection,
 			g_variant_get (parameters, "(b&su&s)", &state, &upstream_host, &upstream_port, &token);
 			GST_DEBUG("app->pipeline=%p, enableUpstream state=%i host=%s port=%i token=%s", app->pipeline, state, upstream_host, upstream_port, token);
 
-			if (state == TRUE && !app->tcp_upstream->enabled)
+			if (state == TRUE && app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
 				result = enable_tcp_upstream(app, upstream_host, upstream_port, token);
-			else if (state == FALSE && app->tcp_upstream->enabled)
+			else if (state == FALSE && app->tcp_upstream->state >= UPSTREAM_STATE_CONNECTING)
 				result = disable_tcp_upstream(app);
 		}
 		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
@@ -579,11 +598,13 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 {
 	App *app = user_data;
+	DreamRTSPserver *r = app->rtsp_server;
 	GST_INFO("no more clients -> media unprepared!");
 	stop_rtsp_pipeline(app);
 	g_mutex_lock (&app->rtsp_mutex);
-	app->rtsp_server->media = NULL;
-	app->rtsp_server->aappsrc = app->rtsp_server->vappsrc = NULL;
+	r->media = NULL;
+	r->aappsrc = r->vappsrc = NULL;
+	r->state = RTSP_STATE_IDLE;
 	g_mutex_unlock (&app->rtsp_mutex);
 }
 
@@ -606,16 +627,18 @@ static void client_connected (GstRTSPServer * server, GstRTSPClient * client, gp
 static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media, gpointer user_data)
 {
 	App *app = user_data;
+	DreamRTSPserver *r = app->rtsp_server;
 	g_mutex_lock (&app->rtsp_mutex);
-	app->rtsp_server->media = media;
+	r->media = media;
 	GstElement *element = gst_rtsp_media_get_element (media);
-	app->rtsp_server->aappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "aappsrc");
-	app->rtsp_server->vappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "vappsrc");
+	r->aappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "aappsrc");
+	r->vappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "vappsrc");
 	gst_object_unref(element);
 	g_signal_connect (media, "unprepared", (GCallback) media_unprepare, app);
-	g_object_set (app->rtsp_server->aappsrc, "format", GST_FORMAT_TIME, NULL);
-	g_object_set (app->rtsp_server->vappsrc, "format", GST_FORMAT_TIME, NULL);
-	app->rtsp_server->rtsp_start_pts = app->rtsp_server->rtsp_start_dts = GST_CLOCK_TIME_NONE;
+	g_object_set (r->aappsrc, "format", GST_FORMAT_TIME, NULL);
+	g_object_set (r->vappsrc, "format", GST_FORMAT_TIME, NULL);
+	r->rtsp_start_pts = r->rtsp_start_dts = GST_CLOCK_TIME_NONE;
+	r->state = RTSP_STATE_RUNNING;
 	start_rtsp_pipeline(app);
 	g_mutex_unlock (&app->rtsp_mutex);
 }
@@ -780,6 +803,17 @@ gboolean create_source_pipeline(App *app)
 	return gst_element_set_state (app->pipeline, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS;
 }
 
+gboolean upstream_connect_cb(App *app)
+{
+	if (app->tcp_upstream->state == UPSTREAM_STATE_CONNECTING)
+	{
+		GST_INFO ("upstream connect succeeded new upstreamState UPSTREAM_STATE_RUNNING");
+	}
+	else
+		GST_INFO ("upstream connect failed.");
+	return FALSE;
+}
+
 static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
 {
 	App *app = user_data;
@@ -788,6 +822,7 @@ static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo
 
 	GST_INFO ("injecting authorization on pad %s:%s, created token_buf %" GST_PTR_FORMAT "", GST_DEBUG_PAD_NAME (sinkpad), token_buf);
 	gst_pad_remove_probe (sinkpad, app->tcp_upstream->inject_id);
+	g_timeout_add_seconds (5, (GSourceFunc) upstream_connect_cb, app);
 	gst_pad_push (srcpad, gst_buffer_ref(token_buf));
 	
 	return GST_PAD_PROBE_REMOVE;
@@ -805,9 +840,9 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 
 	DreamTCPupstream *t = app->tcp_upstream;
 
-	if (!t->enabled)
+	if (t->state == UPSTREAM_STATE_DISABLED)
 	{
-		t->enabled = TRUE;
+		t->state = UPSTREAM_STATE_CONNECTING;
 		t->atcpq = gst_element_factory_make ("queue", NULL);
 		t->vtcpq = gst_element_factory_make ("queue", NULL);
 		t->tsmux = gst_element_factory_make ("mpegtsmux", NULL);
@@ -937,23 +972,22 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 				goto fail;
 			}
 		}
-		GST_INFO_OBJECT(app, "enabled tcp upstream, pipeline is PLAYING");
+		GST_INFO_OBJECT(app, "enabled TCP upstream! upstreamState = UPSTREAM_STATE_CONNECTING");
 		return TRUE;
 	}
 	else
-		GST_INFO_OBJECT (app, "tcp upstream already enabled!");
+		GST_INFO_OBJECT (app, "tcp upstream already enabled! (upstreamState = %i)", t->state);
 	return FALSE;
 
 fail:
 	disable_tcp_upstream(app);
-	t->enabled = FALSE;
 	return FALSE;
 }
 
 DreamRTSPserver *create_rtsp_server(App *app)
 {
 	DreamRTSPserver *r = malloc(sizeof(DreamRTSPserver));
-	r->enabled = FALSE;
+	r->state = RTSP_STATE_DISABLED;
 	r->server = NULL;
 	r->factory = NULL;
 	r->media = NULL;
@@ -975,7 +1009,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 	g_mutex_lock (&app->rtsp_mutex);
 	DreamRTSPserver *r = app->rtsp_server;
 
-	if (!r->enabled)
+	if (r->state == RTSP_STATE_DISABLED)
 	{
 		r->server = gst_rtsp_server_new ();
 		g_signal_connect (r->server, "client-connected", (GCallback) client_connected, app);
@@ -1018,7 +1052,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 
 		r->mounts = gst_rtsp_server_get_mount_points (r->server);
 		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_path, g_object_ref(r->factory));
-		r->enabled = TRUE;
+		r->state = RTSP_STATE_IDLE;
 		r->source_id = gst_rtsp_server_attach (r->server, NULL);
 		g_print ("dreambox encoder stream ready at rtsp://%s127.0.0.1:%s%s\n", credentials, app->rtsp_server->rtsp_port, app->rtsp_server->rtsp_path);
 		return TRUE;
@@ -1034,7 +1068,7 @@ gboolean start_rtsp_pipeline(App* app)
 	GST_DEBUG_OBJECT(app, "start_rtsp_pipeline");
 
 	DreamRTSPserver *r = app->rtsp_server;
-	if (!r->enabled)
+	if (r->state == RTSP_STATE_DISABLED)
 	{
 		GST_ERROR_OBJECT (app, "failed to start rtsp pipeline because rtsp server is not enabled!");
 		return FALSE;
@@ -1055,7 +1089,7 @@ gboolean stop_rtsp_pipeline(App* app)
 {
 	GST_INFO_OBJECT(app, "stop_rtsp_pipeline");
 
-	if (!app->tcp_upstream->enabled)
+	if (!app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
 		pause_source_pipeline(app);
 	return TRUE;
 }
@@ -1118,7 +1152,7 @@ gboolean disable_rtsp_server(App *app)
 {
 	DreamRTSPserver *r = app->rtsp_server;
 	GST_DEBUG("disable_rtsp_server %p", r->server);
-	if (r->enabled)
+	if (r->state >= RTSP_STATE_IDLE)
 	{
 		if (app->rtsp_server->media)
 			gst_rtsp_server_client_filter(app->rtsp_server->server, (GstRTSPServerClientFilterFunc) remove_client_filter_func, app);
@@ -1136,7 +1170,7 @@ gboolean disable_rtsp_server(App *app)
 		g_free(r->rtsp_pass);
 		g_free(r->rtsp_port);
 		g_free(r->rtsp_path);
-		app->rtsp_server->enabled = FALSE;
+		r->state = RTSP_STATE_DISABLED;
 		g_mutex_unlock (&app->rtsp_mutex);
 		GST_INFO("rtsp_server disabled!");
 		return TRUE;
@@ -1148,7 +1182,7 @@ gboolean disable_tcp_upstream(App *app)
 {
 	GST_DEBUG("disable_tcp_upstream");
 	DreamTCPupstream *t = app->tcp_upstream;
-	if (t->enabled)
+	if (t->state >= UPSTREAM_STATE_CONNECTING)
 	{
 		gst_element_set_state (t->tsmux, GST_STATE_NULL);
 		gst_element_set_state (t->atcpq, GST_STATE_NULL);
@@ -1172,11 +1206,11 @@ gboolean disable_tcp_upstream(App *app)
 		gst_element_unlink_many(t->tsmux, t->payloader, t->tcpsink, NULL);
 		gst_bin_remove_many (GST_BIN (app->pipeline), t->atcpq, t->vtcpq, t->tsmux, t->payloader, t->tcpsink, NULL);
 
-		if (!app->rtsp_server->enabled)
+		if (!app->rtsp_server->state == RTSP_STATE_DISABLED)
 			pause_source_pipeline(app);
 
 		GST_INFO("tcp_upstream disabled!");
-		t->enabled = FALSE;
+		t->state = UPSTREAM_STATE_DISABLED;
 		return TRUE;
 	}
 	return FALSE;
@@ -1241,7 +1275,7 @@ int main (int argc, char *argv[])
 			    NULL);
 
 	app.tcp_upstream = malloc(sizeof(DreamTCPupstream));
-	app.tcp_upstream->enabled = FALSE;
+	app.tcp_upstream->state = UPSTREAM_STATE_DISABLED;
 
 	app.rtsp_server = create_rtsp_server(&app);
 
@@ -1255,7 +1289,7 @@ int main (int argc, char *argv[])
 	g_main_loop_unref (app.loop);
 
 	free(app.tcp_upstream);
-	if (app.rtsp_server->enabled)
+	if (app.rtsp_server->state >= RTSP_STATE_IDLE)
 		disable_rtsp_server(&app);
 	if (app.rtsp_server->clients_list)
 		g_list_free (app.rtsp_server->clients_list);
