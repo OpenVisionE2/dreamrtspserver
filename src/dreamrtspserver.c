@@ -940,6 +940,8 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		GST_INFO_OBJECT(app, "enabled tcp upstream, pipeline is PLAYING");
 		return TRUE;
 	}
+	else
+		GST_INFO_OBJECT (app, "tcp upstream already enabled!");
 	return FALSE;
 
 fail:
@@ -1021,6 +1023,9 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		g_print ("dreambox encoder stream ready at rtsp://%s127.0.0.1:%s%s\n", credentials, app->rtsp_server->rtsp_port, app->rtsp_server->rtsp_path);
 		return TRUE;
 	}
+	else
+		GST_INFO_OBJECT (app, "rtsp server already enabled!");
+	g_mutex_unlock (&app->rtsp_mutex);
 	return FALSE;
 }
 
