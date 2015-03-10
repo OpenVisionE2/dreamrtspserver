@@ -61,6 +61,7 @@ typedef struct {
 	gulong inject_id;
 	char token[TOKEN_LEN+1];
 	upstreamState state;
+	int removing;
 } DreamTCPupstream;
 
 typedef struct {
@@ -843,6 +844,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 
 	if (t->state == UPSTREAM_STATE_DISABLED)
 	{
+		t->removing = 0;
 		t->state = UPSTREAM_STATE_CONNECTING;
 		t->atcpq = gst_element_factory_make ("queue", NULL);
 		t->vtcpq = gst_element_factory_make ("queue", NULL);
@@ -874,6 +876,13 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			goto fail;
 		}
 		g_free (check_host);
+
+		GstStateChangeReturn sret = gst_element_set_state (t->tcpsink, GST_STATE_READY);
+		if (sret == GST_STATE_CHANGE_FAILURE)
+		{
+			GST_ERROR_OBJECT (app, "failed to set tcpsink to GST_STATE_READY. %s:%d probably refused connection", upstream_host, upstream_port);
+			goto fail;
+		}
 
 		gst_bin_add_many (GST_BIN(app->pipeline), t->atcpq, t->vtcpq, t->tsmux, t->payloader, t->tcpsink, NULL);
 
@@ -937,16 +946,9 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			t->inject_id = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) inject_authorization, app, NULL);
 			gst_object_unref (sinkpad);
 		}
-
-		GstStateChangeReturn sret = gst_element_set_state (t->tcpsink, GST_STATE_READY);
-		if (sret == GST_STATE_CHANGE_FAILURE)
-		{
-			GST_ERROR_OBJECT (app, "failed to set tcpsink to GST_STATE_READY. %s:%d probably refused connection", upstream_host, upstream_port);
-			goto fail;
-		}
-
+// 		sret = gst_element_set_state (t->tcpsink, GST_STATE_PLAYING);
 		sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
-		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_tcp_upstream");
+
 		if (sret == GST_STATE_CHANGE_FAILURE)
 		{
 			GST_ERROR_OBJECT (app, "GST_STATE_CHANGE_FAILURE for upstream pipeline");
@@ -955,8 +957,10 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		else if (sret == GST_STATE_CHANGE_ASYNC)
 		{
 			GstState state;
-			gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);
-
+//			gst_element_get_state (GST_ELEMENT(t->tcpsink), &state, NULL, 3*GST_SECOND);
+//			GST_DEBUG_OBJECT(app, "app->tcpsink's state=%s", gst_element_state_get_name (state));
+                        gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);
+			GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_tcp_upstream");			GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_tcp_upstream");
 			GValue item = G_VALUE_INIT;
 				GstIterator* iter = gst_bin_iterate_elements(GST_BIN(app->pipeline));
 				while (GST_ITERATOR_OK == gst_iterator_next(iter, (GValue*)&item))
@@ -1179,39 +1183,90 @@ gboolean disable_rtsp_server(App *app)
 	return FALSE;
 }
 
+static GstPadProbeReturn pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
+{
+	App *app = user_data;
+	DreamTCPupstream *t = app->tcp_upstream;
+
+	t->removing++;
+	GST_DEBUG_OBJECT (pad, "event_probe_unlink_cb removing=%i", t->removing);
+
+	GstElement *element = gst_pad_get_parent_element(pad);
+
+	if (element == t->tcpsink)
+	{
+		gst_element_unlink_many(t->tsmux, t->payloader, t->tcpsink, NULL);
+		gst_bin_remove_many (GST_BIN (app->pipeline), t->tsmux, t->payloader, t->tcpsink, NULL);
+
+		gst_element_set_state (t->tsmux, GST_STATE_NULL);
+		gst_element_set_state (t->payloader, GST_STATE_NULL);
+		gst_element_set_state (t->tcpsink, GST_STATE_NULL);
+
+		gst_object_unref (t->tsmux);
+		gst_object_unref (t->payloader);
+		gst_object_unref (element);
+	}
+	else
+	{
+		GstPad *teepad, *srcpad, *muxpad;
+		teepad = gst_pad_get_peer(pad);
+		gst_pad_unlink (teepad, pad);
+
+		srcpad = gst_element_get_static_pad (element, "src");
+		muxpad = gst_pad_get_peer(srcpad);
+		gst_pad_unlink (srcpad, muxpad);
+		gst_element_release_request_pad (app->tcp_upstream->tsmux, muxpad);
+		gst_object_unref (srcpad);
+		gst_object_unref (muxpad);
+
+		gst_bin_remove (GST_BIN (app->pipeline), element);
+		gst_element_set_state (element, GST_STATE_NULL);
+		gst_object_unref (element);
+
+		GstElement *tee = gst_pad_get_parent_element(teepad);
+		gst_element_release_request_pad (tee, teepad);
+		gst_object_unref (teepad);
+		gst_object_unref (tee);
+	}
+
+	if (t->removing == 2)
+	{
+		gst_object_ref (t->tsmux);
+		gst_object_ref (t->payloader);
+		gst_object_ref (t->tcpsink);
+		GstPad *sinkpad;
+		sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, pad_probe_unlink_cb, app, NULL);
+		gst_object_unref (sinkpad);
+	}
+	else if (t->removing == 3)
+	{
+		if (app->rtsp_server->state == RTSP_STATE_DISABLED)
+			pause_source_pipeline(app);
+		GST_INFO("tcp_upstream disabled!");
+		t->state = UPSTREAM_STATE_DISABLED;
+	}
+	return GST_PAD_PROBE_REMOVE;
+}
+
 gboolean disable_tcp_upstream(App *app)
 {
 	GST_DEBUG("disable_tcp_upstream");
 	DreamTCPupstream *t = app->tcp_upstream;
 	if (t->state >= UPSTREAM_STATE_CONNECTING)
 	{
-		gst_element_set_state (t->tsmux, GST_STATE_NULL);
-		gst_element_set_state (t->atcpq, GST_STATE_NULL);
-		gst_element_set_state (t->vtcpq, GST_STATE_NULL);
-		gst_element_set_state (t->payloader, GST_STATE_NULL);
-		gst_element_set_state (t->tcpsink, GST_STATE_NULL);
+		gst_object_ref (t->atcpq);
+		gst_object_ref (t->vtcpq);
 
-		GstPad *teepad, *sinkpad;
+		GstPad *sinkpad;
 		sinkpad = gst_element_get_static_pad (t->atcpq, "sink");
-		teepad = gst_pad_get_peer(sinkpad);
-		gst_pad_unlink (teepad, sinkpad);
-		gst_element_release_request_pad (app->atee, teepad);
-		gst_object_unref (teepad);
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);
+
 		sinkpad = gst_element_get_static_pad (t->vtcpq, "sink");
-		teepad = gst_pad_get_peer(sinkpad);
-		gst_pad_unlink (teepad, sinkpad);
-		gst_element_release_request_pad (app->vtee, teepad);
-		gst_object_unref (teepad);
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);
-		gst_element_unlink_many(t->tsmux, t->payloader, t->tcpsink, NULL);
-		gst_bin_remove_many (GST_BIN (app->pipeline), t->atcpq, t->vtcpq, t->tsmux, t->payloader, t->tcpsink, NULL);
 
-		if (app->rtsp_server->state == RTSP_STATE_DISABLED)
-			pause_source_pipeline(app);
-
-		GST_INFO("tcp_upstream disabled!");
-		t->state = UPSTREAM_STATE_DISABLED;
 		return TRUE;
 	}
 	return FALSE;
