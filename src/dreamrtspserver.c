@@ -317,7 +317,7 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 		inputMode input_mode = g_variant_get_int32 (value);
 		if (input_mode >= INPUT_MODE_LIVE && input_mode <= INPUT_MODE_BACKGROUND )
 		{
-// 			if (gst_set_inputmode(app, input_mode))
+			if (gst_set_inputmode(app, input_mode))
 				return 1;
 		}
 		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] can't set input_mode to %d", input_mode);
