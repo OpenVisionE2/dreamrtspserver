@@ -26,7 +26,10 @@
 GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 #define GST_CAT_DEFAULT dreamrtspserver_debug
 
-#define TOKEN_LEN 36
+#define TS_PACK_SIZE 188
+#define TS_PER_FRAME 7
+#define BLOCK_SIZE   TS_PER_FRAME*188
+#define TOKEN_LEN    36
 
 typedef enum {
         INPUT_MODE_LIVE = 0,
@@ -314,7 +317,7 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 		inputMode input_mode = g_variant_get_int32 (value);
 		if (input_mode >= INPUT_MODE_LIVE && input_mode <= INPUT_MODE_BACKGROUND )
 		{
-			if (gst_set_inputmode(app, input_mode))
+// 			if (gst_set_inputmode(app, input_mode))
 				return 1;
 		}
 		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] can't set input_mode to %d", input_mode);
@@ -547,7 +550,7 @@ gboolean create_source_pipeline(App *app)
 		g_error ("Failed to create source pipeline element(s):%s%s%s%s", app->asrc?"":" dreamaudiosource", app->vsrc?"":" dreamvideosource", app->aparse?"":" aacparse", app->vparse?"":" h264parse");
 	}
 	
-	g_object_set (G_OBJECT (app->tsq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+	g_object_set (G_OBJECT (app->tsq), "leaky", 2, "max-size-buffers", TS_PER_FRAME, "max-size-bytes", BLOCK_SIZE, "max-size-time", G_GINT64_CONSTANT(0), NULL);
 
 	gst_bin_add_many (GST_BIN (app->pipeline), app->asrc, app->vsrc, app->aparse, app->vparse, NULL);
 	gst_bin_add_many (GST_BIN (app->pipeline), app->tsmux, app->tsq, NULL);
@@ -644,6 +647,9 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 
 		if (!t->tcpsink)
 		g_error ("Failed to create tcp upstream element: %s", t->tcpsink?"":"  tcpclientsink" );
+
+		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(3)*GST_SECOND, NULL);
+		g_object_set (t->tcpsink, "blocksize", BLOCK_SIZE, NULL);
 
 		g_object_set (t->tcpsink, "host", upstream_host, NULL);
 		g_object_set (t->tcpsink, "port", upstream_port, NULL);
