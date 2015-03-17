@@ -549,8 +549,8 @@ gboolean create_source_pipeline(App *app)
 	{
 		g_error ("Failed to create source pipeline element(s):%s%s%s%s", app->asrc?"":" dreamaudiosource", app->vsrc?"":" dreamvideosource", app->aparse?"":" aacparse", app->vparse?"":" h264parse");
 	}
-	
-	g_object_set (G_OBJECT (app->tsq), "leaky", 2, "max-size-buffers", TS_PER_FRAME, "max-size-bytes", BLOCK_SIZE, "max-size-time", G_GINT64_CONSTANT(0), NULL);
+
+	g_object_set (G_OBJECT (app->tsq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 
 	gst_bin_add_many (GST_BIN (app->pipeline), app->asrc, app->vsrc, app->aparse, app->vparse, NULL);
 	gst_bin_add_many (GST_BIN (app->pipeline), app->tsmux, app->tsq, NULL);
