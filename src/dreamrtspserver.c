@@ -89,6 +89,12 @@ static const gchar introspection_xml[] =
   "    <property type='i' name='width' access='read'/>"
   "    <property type='i' name='height' access='read'/>"
   "    <property type='i' name='inputMode' access='readwrite'/>"
+  "    <signal name='sourceReady'/>"
+  "    <signal name='encoderError'/>"
+  "    <signal name='daemonExit'/>"
+  "    <signal name='upstreamStateChanged'>"
+  "      <arg type='i' name='state' direction='out'/>"
+  "    </signal>"
   "  </interface>"
   "</node>";
 
@@ -880,7 +886,7 @@ int main (int argc, char *argv[])
 			    &app,
 			    NULL);
 
-	if (create_source_pipeline(&app))
+	if (!create_source_pipeline(&app))
 		g_error ("Failed to create source pipeline!");
 
 	app.tcp_upstream = malloc(sizeof(DreamTCPupstream));
@@ -899,7 +905,7 @@ int main (int argc, char *argv[])
 
 	g_mutex_clear (&app.rtsp_mutex);
 
-	send_signal (&app, "deamonExit", NULL);
+	send_signal (&app, "daemonExit", NULL);
 
 	g_bus_unown_name (owner_id);
 	g_dbus_node_info_unref (introspection_data);
