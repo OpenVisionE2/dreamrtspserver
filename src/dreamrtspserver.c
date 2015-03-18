@@ -52,6 +52,7 @@ typedef struct {
 } DreamTCPupstream;
 
 typedef struct {
+	GDBusConnection *dbus_connection;
 	GMainLoop *loop;
 
 	GstElement *pipeline;
@@ -408,6 +409,17 @@ static void handle_method_call (GDBusConnection       *connection,
 	} // if it's an unknown method
 } // handle_method_call
 
+static void send_signal (App *app, const gchar *signal_name, GVariant *parameters)
+{
+	if (app->dbus_connection)
+	{
+		GST_DEBUG ("sending signal name=%s parameters=%s", signal_name, parameters?g_variant_print (parameters, TRUE):"[not given]");
+		g_dbus_connection_emit_signal (app->dbus_connection, NULL, object_name, service, signal_name, parameters, NULL);
+	}
+	else
+		GST_DEBUG ("no dbus connection, can't send signal %s", signal_name);
+}
+
 static void on_bus_acquired (GDBusConnection *connection,
 			     const gchar     *name,
 			     gpointer        user_data)
@@ -428,15 +440,19 @@ static void on_name_acquired (GDBusConnection *connection,
 			      const gchar     *name,
 			      gpointer         user_data)
 {
+	App *app = user_data;
+	app->dbus_connection = connection;
 	GST_DEBUG ("aquired dbus name (\"%s\")", name);
+	if (gst_element_set_state (app->pipeline, GST_STATE_READY) != GST_STATE_CHANGE_SUCCESS)
+		GST_ERROR ("Failed to bring state of source pipeline to READY");
 } // on_name_acquired
 
 static void on_name_lost (GDBusConnection *connection,
 			  const gchar     *name,
 			  gpointer         user_data)
 {
-// 	App *app = user_data;
-
+	App *app = user_data;
+	app->dbus_connection = NULL;
 	GST_WARNING ("lost dbus name (\"%s\" @ %p)", name, connection);
 	//  g_main_loop_quit (app->loop);
 } // on_name_lost
@@ -457,20 +473,14 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 			if (GST_MESSAGE_SRC(message) == GST_OBJECT(app->pipeline))
 			{
 				GST_DEBUG_OBJECT(app, "state transition %s -> %s", gst_element_state_get_name(old_state), gst_element_state_get_name(new_state));
-
 				GstStateChange transition = (GstStateChange)GST_STATE_TRANSITION(old_state, new_state);
-
 				switch(transition)
 				{
-					case GST_STATE_CHANGE_READY_TO_PAUSED:
-					{
-						if (GST_MESSAGE_SRC (message) == GST_OBJECT (app->pipeline))
-						{
-						}
-					}	break;
+					case GST_STATE_CHANGE_NULL_TO_READY:
+						send_signal (app, "sourceReady", NULL);
+						break;
 					default:
-					{
-					}	break;
+						break;
 				}
 			}
 			break;
@@ -483,6 +493,14 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 			gst_message_parse_error (message, &err, &debug);
 			if (err->domain == GST_RESOURCE_ERROR)
 			{
+				if (err->code == GST_RESOURCE_ERROR_READ)
+				{
+					GST_INFO ("element %s: %s", name, err->message);
+					send_signal (app, "encoderError", NULL);
+					g_mutex_unlock (&app->rtsp_mutex);
+					disable_tcp_upstream(app);
+					destroy_pipeline(app);
+				}
 				if (err->code == GST_RESOURCE_ERROR_WRITE)
 				{
 					GST_INFO ("element %s: %s -> this means PEER DISCONNECTED", name, err->message);
@@ -536,6 +554,12 @@ gboolean create_source_pipeline(App *app)
 	GST_INFO_OBJECT(app, "create_source_pipeline");
 	g_mutex_lock (&app->rtsp_mutex);
 	app->pipeline = gst_pipeline_new (NULL);
+
+	GstBus *bus = gst_pipeline_get_bus (GST_PIPELINE (app->pipeline));
+	gst_bus_add_signal_watch (bus);
+	g_signal_connect (G_OBJECT (bus), "message", G_CALLBACK (message_cb), app);
+	gst_object_unref (GST_OBJECT (bus));
+
 	app->asrc = gst_element_factory_make ("dreamaudiosource", "dreamaudiosource0");
 	app->vsrc = gst_element_factory_make ("dreamvideosource", "dreamvideosource0");
 
@@ -588,23 +612,20 @@ gboolean create_source_pipeline(App *app)
 		g_error ("Failed to link tsmux to tsqueue");
 	}
 
-	GstBus *bus = gst_pipeline_get_bus (GST_PIPELINE (app->pipeline));
-	gst_bus_add_signal_watch (bus);
-	g_signal_connect (G_OBJECT (bus), "message", G_CALLBACK (message_cb), app);
-	gst_object_unref (GST_OBJECT (bus));
-
 	app->clock = gst_system_clock_obtain();
 	gst_pipeline_use_clock(GST_PIPELINE (app->pipeline), app->clock);
 
 	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"create_source_pipeline");
 	g_mutex_unlock (&app->rtsp_mutex);
-	return gst_element_set_state (app->pipeline, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS;
+	return TRUE;
 }
 
 gboolean upstream_connect_cb(App *app)
 {
 	if (app->tcp_upstream->state == UPSTREAM_STATE_CONNECTING)
 	{
+		app->tcp_upstream->state = UPSTREAM_STATE_RUNNING;
+		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", app->tcp_upstream->state));
 		GST_INFO ("upstream connect succeeded new upstreamState UPSTREAM_STATE_RUNNING");
 	}
 	else
@@ -642,6 +663,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 	{
 		t->removing = 0;
 		t->state = UPSTREAM_STATE_CONNECTING;
+		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
 
 		t->tcpsink = gst_element_factory_make ("tcpclientsink", NULL);
 
@@ -676,6 +698,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			GST_ERROR_OBJECT (app, "failed to set tcpsink to GST_STATE_READY. %s:%d probably refused connection", upstream_host, upstream_port);
 			gst_object_unref (t->tcpsink);
 			t->state = UPSTREAM_STATE_DISABLED;
+			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
 			return FALSE;
 		}
 
@@ -694,15 +717,6 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		}
 		
 		sret = gst_element_set_state (t->tcpsink, GST_STATE_PAUSED);
-		GST_DEBUG_OBJECT(app, "gst_element_set_state (t->tcpsink, GST_STATE_PAUSED) = %i", sret);
-		
-// 		if (sret == GST_STATE_CHANGE_ASYNC)
-// 		{
-// 			GstState state;
-// 			gst_element_get_state (GST_ELEMENT (t->tcpsink), &state, NULL, 3*GST_SECOND);
-// 			GST_DEBUG_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", t->tcpsink, gst_element_state_get_name (state));
-// 		}
-
 		sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
 		GST_DEBUG_OBJECT(app, "gst_element_set_state (app->pipeline, GST_STATE_PLAYING) = %i", sret);
 
@@ -782,6 +796,7 @@ static GstPadProbeReturn pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * in
 
 		GST_INFO("tcp_upstream disabled!");
 		t->state = UPSTREAM_STATE_DISABLED;
+		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
 		
 		ret = GST_PAD_PROBE_REMOVE;
 	}
@@ -852,10 +867,9 @@ int main (int argc, char *argv[])
 
 	memset (&app, 0, sizeof(app));
 	g_mutex_init (&app.rtsp_mutex);
-	if (!create_source_pipeline(&app))
-		g_error ("Failed to bring state of source pipeline to READY");
 
 	introspection_data = g_dbus_node_info_new_for_xml (introspection_xml, NULL);
+	app.dbus_connection = NULL;
 
 	owner_id = g_bus_own_name (G_BUS_TYPE_SYSTEM,
 				   service,
@@ -865,6 +879,9 @@ int main (int argc, char *argv[])
 			    on_name_lost,
 			    &app,
 			    NULL);
+
+	if (create_source_pipeline(&app))
+		g_error ("Failed to create source pipeline!");
 
 	app.tcp_upstream = malloc(sizeof(DreamTCPupstream));
 	app.tcp_upstream->state = UPSTREAM_STATE_DISABLED;
@@ -882,9 +899,10 @@ int main (int argc, char *argv[])
 
 	g_mutex_clear (&app.rtsp_mutex);
 
+	send_signal (&app, "deamonExit", NULL);
+
 	g_bus_unown_name (owner_id);
 	g_dbus_node_info_unref (introspection_data);
 
-	GST_DEBUG("exit");
 	return 0;
 }
