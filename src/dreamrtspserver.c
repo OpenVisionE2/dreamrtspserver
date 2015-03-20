@@ -91,7 +91,6 @@ static const gchar introspection_xml[] =
   "    <property type='i' name='inputMode' access='readwrite'/>"
   "    <signal name='sourceReady'/>"
   "    <signal name='encoderError'/>"
-  "    <signal name='daemonExit'/>"
   "    <signal name='upstreamStateChanged'>"
   "      <arg type='i' name='state' direction='out'/>"
   "    </signal>"
@@ -215,7 +214,7 @@ static gboolean gst_get_capsprop(App *app, const gchar* element_name, const gcha
 
 	g_object_get (G_OBJECT (element), "caps", &caps, NULL);
 
-	if (!GST_IS_CAPS(caps))
+	if (!GST_IS_CAPS(caps) || gst_caps_is_empty (caps) )
 		goto out;
 
 	GST_DEBUG("current caps %" GST_PTR_FORMAT, caps);
@@ -887,7 +886,7 @@ int main (int argc, char *argv[])
 			    NULL);
 
 	if (!create_source_pipeline(&app))
-		g_error ("Failed to create source pipeline!");
+		g_print ("Failed to create source pipeline!");
 
 	app.tcp_upstream = malloc(sizeof(DreamTCPupstream));
 	app.tcp_upstream->state = UPSTREAM_STATE_DISABLED;
@@ -904,8 +903,6 @@ int main (int argc, char *argv[])
 	free(app.tcp_upstream);
 
 	g_mutex_clear (&app.rtsp_mutex);
-
-	send_signal (&app, "daemonExit", NULL);
 
 	g_bus_unown_name (owner_id);
 	g_dbus_node_info_unref (introspection_data);
