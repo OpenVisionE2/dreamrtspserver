@@ -34,6 +34,11 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 #define AAPPSINK "aappsink"
 #define VAPPSINK "vappsink"
 
+#define ES_AAPPSRC "es_aappsrc"
+#define ES_VAPPSRC "es_vappsrc"
+#define TS_AAPPSRC "ts_aappsrc"
+#define TS_VAPPSRC "ts_vappsrc"
+
 #define TS_PACK_SIZE 188
 #define TS_PER_FRAME 7
 #define BLOCK_SIZE   TS_PER_FRAME*188
@@ -70,9 +75,10 @@ typedef struct {
 typedef struct {
 	GstRTSPServer *server;
 	GstRTSPMountPoints *mounts;
-	GstRTSPMediaFactory *factory;
-	GstRTSPMedia * media;
-	GstElement *aappsrc, *vappsrc;
+	GstRTSPMediaFactory *es_factory, *ts_factory;
+	GstRTSPMedia *es_media, *ts_media;
+	GstElement *es_aappsrc, *es_vappsrc;
+	GstElement *ts_aappsrc, *ts_vappsrc;
 	GstClockTime rtsp_start_pts, rtsp_start_dts;
 	gchar *rtsp_user, *rtsp_pass;
 	GList *clients_list;
@@ -630,8 +636,8 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	GST_INFO("no more clients -> media unprepared!");
 	stop_rtsp_pipeline(app);
 	g_mutex_lock (&app->rtsp_mutex);
-	r->media = NULL;
-	r->aappsrc = r->vappsrc = NULL;
+	r->es_media = NULL;
+	r->es_aappsrc = r->es_vappsrc = NULL;
 	r->state = RTSP_STATE_IDLE;
 	g_mutex_unlock (&app->rtsp_mutex);
 }
@@ -657,14 +663,29 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 	App *app = user_data;
 	DreamRTSPserver *r = app->rtsp_server;
 	g_mutex_lock (&app->rtsp_mutex);
-	r->media = media;
-	GstElement *element = gst_rtsp_media_get_element (media);
-	r->aappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "aappsrc");
-	r->vappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), "vappsrc");
-	gst_object_unref(element);
-	g_signal_connect (media, "unprepared", (GCallback) media_unprepare, app);
-	g_object_set (r->aappsrc, "format", GST_FORMAT_TIME, NULL);
-	g_object_set (r->vappsrc, "format", GST_FORMAT_TIME, NULL);
+
+	if (factory == r->es_factory)
+	{
+		r->es_media = media;
+		GstElement *element = gst_rtsp_media_get_element (media);
+		r->es_aappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), ES_AAPPSRC);
+		r->es_vappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), ES_VAPPSRC);
+		gst_object_unref(element);
+		g_signal_connect (media, "unprepared", (GCallback) media_unprepare, app);
+		g_object_set (r->es_aappsrc, "format", GST_FORMAT_TIME, NULL);
+		g_object_set (r->es_vappsrc, "format", GST_FORMAT_TIME, NULL);
+	}
+	else if (factory == r->ts_factory)
+	{
+		r->ts_media = media;
+		GstElement *element = gst_rtsp_media_get_element (media);
+		r->ts_aappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), TS_AAPPSRC);
+		r->ts_vappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), TS_VAPPSRC);
+		gst_object_unref(element);
+		g_signal_connect (media, "unprepared", (GCallback) media_unprepare, app);
+		g_object_set (r->ts_aappsrc, "format", GST_FORMAT_TIME, NULL);
+		g_object_set (r->ts_vappsrc, "format", GST_FORMAT_TIME, NULL);
+	}
 	r->rtsp_start_pts = r->rtsp_start_dts = GST_CLOCK_TIME_NONE;
 	r->state = RTSP_STATE_RUNNING;
 	start_rtsp_pipeline(app);
@@ -677,18 +698,25 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 	DreamRTSPserver *r = app->rtsp_server;
 
 	g_mutex_lock (&app->rtsp_mutex);
-	GstAppSrc* appsrc = NULL;
+	GstAppSrc *es_appsrc, *ts_appsrc;
+	es_appsrc = ts_appsrc = NULL;
 	if ( appsink == app->vappsink )
-		appsrc = GST_APP_SRC(r->vappsrc);
+	{
+		es_appsrc = GST_APP_SRC(r->es_vappsrc);
+		ts_appsrc = GST_APP_SRC(r->ts_vappsrc);
+	}
 	else if ( appsink == app->aappsink )
-		appsrc = GST_APP_SRC(r->aappsrc);
+	{
+		es_appsrc = GST_APP_SRC(r->es_aappsrc);
+		ts_appsrc = GST_APP_SRC(r->ts_aappsrc);
+	}
 
 	GstSample *sample = gst_app_sink_pull_sample (GST_APP_SINK (appsink));
-	if (appsrc && g_list_length(r->clients_list) > 0) {
+	if ((es_appsrc || ts_appsrc) && g_list_length(r->clients_list) > 0) {
 		GstBuffer *buffer = gst_sample_get_buffer (sample);
 		GstCaps *caps = gst_sample_get_caps (sample);
 
-		GST_LOG("original PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), appsrc);
+		GST_LOG("original PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT" %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), es_appsrc, ts_appsrc);
 		if (r->rtsp_start_pts == GST_CLOCK_TIME_NONE) {
 			if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
 			{
@@ -701,7 +729,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 			{
 				r->rtsp_start_pts = GST_BUFFER_PTS (buffer);
 				r->rtsp_start_dts = GST_BUFFER_DTS (buffer);
-				GST_DEBUG("frame is IFRAME! set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), appsrc);
+				GST_DEBUG("frame is IFRAME! set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT" %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), es_appsrc, ts_appsrc);
 			}
 		}
 		if (GST_BUFFER_PTS (buffer) < r->rtsp_start_pts)
@@ -711,13 +739,30 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		GST_BUFFER_DTS (buffer) -= r->rtsp_start_dts;
 		//    GST_LOG("new PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)));
 
-		GstCaps *oldcaps = gst_app_src_get_caps (appsrc);
-		if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
+
+		GstCaps *oldcaps;
+
+		if (es_appsrc)
 		{
-			GST_LOG("CAPS changed! %" GST_PTR_FORMAT " to %" GST_PTR_FORMAT, oldcaps, caps);
-			gst_app_src_set_caps (appsrc, caps);
+			oldcaps = gst_app_src_get_caps (es_appsrc);
+			if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
+			{
+				GST_LOG("CAPS changed! %" GST_PTR_FORMAT " to %" GST_PTR_FORMAT, oldcaps, caps);
+				gst_app_src_set_caps (es_appsrc, caps);
+			}
+			gst_app_src_push_buffer (es_appsrc, gst_buffer_ref(buffer));
 		}
-		gst_app_src_push_buffer (appsrc, gst_buffer_ref(buffer));
+
+		if (ts_appsrc)
+		{
+			oldcaps = gst_app_src_get_caps (ts_appsrc);
+			if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
+			{
+				GST_LOG("CAPS changed! %" GST_PTR_FORMAT " to %" GST_PTR_FORMAT, oldcaps, caps);
+				gst_app_src_set_caps (ts_appsrc, caps);
+			}
+			gst_app_src_push_buffer (ts_appsrc, gst_buffer_ref(buffer));
+		}
 	}
 	else
 	{
@@ -855,7 +900,7 @@ static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo
 	gst_pad_remove_probe (sinkpad, app->tcp_upstream->inject_id);
 	g_timeout_add_seconds (5, (GSourceFunc) upstream_connect_cb, app);
 	gst_pad_push (srcpad, gst_buffer_ref(token_buf));
-	
+
 	return GST_PAD_PROBE_REMOVE;
 }
 
@@ -1033,9 +1078,10 @@ DreamRTSPserver *create_rtsp_server(App *app)
 	DreamRTSPserver *r = malloc(sizeof(DreamRTSPserver));
 	r->state = RTSP_STATE_DISABLED;
 	r->server = NULL;
-	r->factory = NULL;
-	r->media = NULL;
-	r->aappsrc = r->vappsrc = NULL;
+	r->ts_factory = r->es_factory = NULL;
+	r->ts_media = r->es_media = NULL;
+	r->ts_aappsrc = r->ts_vappsrc = NULL;
+	r->es_aappsrc = r->es_vappsrc = NULL;
 	r->clients_list = NULL;
 	return r;
 }
@@ -1058,11 +1104,17 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		r->server = gst_rtsp_server_new ();
 		g_signal_connect (r->server, "client-connected", (GCallback) client_connected, app);
 
-		r->factory = gst_rtsp_media_factory_new ();
-		gst_rtsp_media_factory_set_launch (r->factory, "( appsrc name=vappsrc ! h264parse ! rtph264pay name=pay0 pt=96   appsrc name=aappsrc ! aacparse ! rtpmp4apay name=pay1 pt=97 )");
-		gst_rtsp_media_factory_set_shared (r->factory, TRUE);
+		r->es_factory = gst_rtsp_media_factory_new ();
+		gst_rtsp_media_factory_set_launch (r->es_factory, "( appsrc name=" ES_VAPPSRC " ! h264parse ! rtph264pay name=pay0 pt=96   appsrc name=" ES_AAPPSRC " ! aacparse ! rtpmp4apay name=pay1 pt=97 )");
+		gst_rtsp_media_factory_set_shared (r->es_factory, TRUE);
 
-		g_signal_connect (r->factory, "media-configure", (GCallback) media_configure, app);
+		g_signal_connect (r->es_factory, "media-configure", (GCallback) media_configure, app);
+
+		r->ts_factory = gst_rtsp_media_factory_new ();
+		gst_rtsp_media_factory_set_launch (r->ts_factory, "( appsrc name=" TS_VAPPSRC " ! queue ! h264parse ! mpegtsmux name=mux ! queue ! rtpmp2tpay name=pay0 pt=96   appsrc name=" TS_AAPPSRC " ! queue ! aacparse ! mux. )");
+		gst_rtsp_media_factory_set_shared (r->ts_factory, TRUE);
+
+		g_signal_connect (r->ts_factory, "media-configure", (GCallback) media_configure, app);
 
 		g_mutex_unlock (&app->rtsp_mutex);
 
@@ -1073,7 +1125,8 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 			GstRTSPToken *token;
 			gchar *basic;
 			GstRTSPAuth *auth = gst_rtsp_auth_new ();
-			gst_rtsp_media_factory_add_role (r->factory, "user", GST_RTSP_PERM_MEDIA_FACTORY_ACCESS, G_TYPE_BOOLEAN, TRUE, GST_RTSP_PERM_MEDIA_FACTORY_CONSTRUCT, G_TYPE_BOOLEAN, TRUE, NULL);
+			gst_rtsp_media_factory_add_role (r->es_factory, "user", GST_RTSP_PERM_MEDIA_FACTORY_ACCESS, G_TYPE_BOOLEAN, TRUE, GST_RTSP_PERM_MEDIA_FACTORY_CONSTRUCT, G_TYPE_BOOLEAN, TRUE, NULL);
+			gst_rtsp_media_factory_add_role (r->ts_factory, "user", GST_RTSP_PERM_MEDIA_FACTORY_ACCESS, G_TYPE_BOOLEAN, TRUE, GST_RTSP_PERM_MEDIA_FACTORY_CONSTRUCT, G_TYPE_BOOLEAN, TRUE, NULL);
 			token = gst_rtsp_token_new (GST_RTSP_TOKEN_MEDIA_FACTORY_ROLE, G_TYPE_STRING, "user", NULL);
 			basic = gst_rtsp_auth_make_basic (r->rtsp_user, r->rtsp_pass);
 			gst_rtsp_server_set_auth (r->server, auth);
@@ -1095,7 +1148,8 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 			r->rtsp_path = g_strdup(DEFAULT_RTSP_PATH);
 
 		r->mounts = gst_rtsp_server_get_mount_points (r->server);
-		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_path, g_object_ref(r->factory));
+		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_path, g_object_ref(r->es_factory));
+		gst_rtsp_mount_points_add_factory (r->mounts, "/ts", g_object_ref(r->ts_factory));
 		r->state = RTSP_STATE_IDLE;
 		r->source_id = gst_rtsp_server_attach (r->server, NULL);
 		g_print ("dreambox encoder stream ready at rtsp://%s127.0.0.1:%s%s\n", credentials, app->rtsp_server->rtsp_port, app->rtsp_server->rtsp_path);
@@ -1154,7 +1208,7 @@ GstRTSPFilterResult remove_media_filter_func (GstRTSPSession * sess, GstRTSPSess
 	GstRTSPMedia *media;
 	media = gst_rtsp_session_media_get_media (session_media);
 	g_mutex_lock (&app->rtsp_mutex);
-	if (media == app->rtsp_server->media) {
+	if (media == app->rtsp_server->es_media) {
 		GST_DEBUG_OBJECT (app, "matching RTSP media %p in filter, removing...", media);
 		res = GST_RTSP_FILTER_REMOVE;
 	}
@@ -1198,7 +1252,7 @@ gboolean disable_rtsp_server(App *app)
 	GST_DEBUG("disable_rtsp_server %p", r->server);
 	if (r->state >= RTSP_STATE_IDLE)
 	{
-		if (app->rtsp_server->media)
+		if (app->rtsp_server->es_media)
 			gst_rtsp_server_client_filter(app->rtsp_server->server, (GstRTSPServerClientFilterFunc) remove_client_filter_func, app);
 		g_mutex_lock (&app->rtsp_mutex);
 		gst_rtsp_mount_points_remove_factory (app->rtsp_server->mounts, app->rtsp_server->rtsp_path);
