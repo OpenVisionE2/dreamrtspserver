@@ -775,7 +775,7 @@ void assert_tsmux(App *app)
 	if (app->tsmux)
 		return;
 
-	GST_INFO_OBJECT (app, "inserting tsmux");
+	GST_DEBUG_OBJECT (app, "inserting tsmux");
 
 	app->tsmux = gst_element_factory_make ("mpegtsmux", NULL);
 	gst_bin_add (GST_BIN (app->pipeline), app->tsmux);
@@ -783,11 +783,8 @@ void assert_tsmux(App *app)
 	GstPad *sinkpad, *srcpad;
 	GstPadLinkReturn ret;
 
-	GST_INFO ("aq % " GST_PTR_FORMAT " ! mpegtsmux %" GST_PTR_FORMAT "", app->aq, app->tsmux);
-
 	srcpad = gst_element_get_static_pad (app->aq, "src");
 	sinkpad = gst_element_get_compatible_pad (app->tsmux, srcpad, NULL);
-	GST_INFO ("link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
 	ret = gst_pad_link (srcpad, sinkpad);
 	if (ret != GST_PAD_LINK_OK)
 		g_error ("couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
@@ -979,6 +976,8 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			return FALSE;
 		}
 
+		gst_bin_add_many (GST_BIN(app->pipeline), t->tstcpq, t->tcpsink, NULL);
+
 		GstPadLinkReturn ret;
 		GstPad *srcpad, *sinkpad;
 		srcpad = gst_element_get_request_pad (app->tstee, "src_%u");
@@ -991,8 +990,6 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
 			goto fail;
 		}
-
-		gst_bin_add_many (GST_BIN(app->pipeline), t->tstcpq, t->tcpsink, NULL);
 
 		if (!gst_element_link (t->tstcpq, t->tcpsink)) {
 			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", t->tstcpq, t->tcpsink);
@@ -1137,15 +1134,16 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		gst_object_unref (teepad);
 		gst_object_unref (sinkpad);
 
+		GstStateChangeReturn sret;
 		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
-		{
-			GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_READY);
+			sret = gst_element_set_state (app->pipeline, GST_STATE_READY);
+		else
+			sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
 
-			if (sret != GST_STATE_CHANGE_SUCCESS)
-			{
-				GST_ERROR_OBJECT (app, "state change failure (%i) for local rtsp pipeline", sret);
-				return FALSE;
-			}
+		if (sret == GST_STATE_CHANGE_FAILURE)
+		{
+			GST_ERROR_OBJECT (app, "state change failure for local rtsp pipeline");
+			return FALSE;
 		}
 
 		r->server = gst_rtsp_server_new ();
