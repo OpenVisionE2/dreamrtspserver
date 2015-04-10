@@ -58,7 +58,8 @@ typedef enum {
 typedef enum {
         UPSTREAM_STATE_DISABLED = 0,
         UPSTREAM_STATE_CONNECTING = 1,
-        UPSTREAM_STATE_RUNNING = 2
+        UPSTREAM_STATE_WAITING = 2,
+        UPSTREAM_STATE_TRANSMITTING = 3
 } upstreamState;
 
 typedef struct {
@@ -149,6 +150,8 @@ static const gchar introspection_xml[] =
 
 gboolean create_source_pipeline(App *app);
 gboolean halt_source_pipeline(App *app);
+gboolean pause_source_pipeline(App *app);
+gboolean unpause_source_pipeline(App *app);
 DreamRTSPserver *create_rtsp_server(App *app);
 gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gchar *user, const gchar *pass);
 gboolean disable_rtsp_server(App *app);
@@ -156,6 +159,8 @@ gboolean start_rtsp_pipeline(App *app);
 gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstream_port, const gchar *token);
 gboolean disable_tcp_upstream(App *app);
 gboolean destroy_pipeline(App *app);
+static void queue_underrun (GstElement *, gpointer);
+static void queue_overrun (GstElement *, gpointer);
 
 static gboolean gst_set_inputmode(App *app, inputMode input_mode)
 {
@@ -705,6 +710,38 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 	g_mutex_unlock (&app->rtsp_mutex);
 }
 
+static void queue_underrun (GstElement * queue, gpointer user_data)
+{
+	App *app = user_data;
+	GST_DEBUG_OBJECT (queue, "queue underrun");
+	if (queue == app->tcp_upstream->tstcpq && app->rtsp_server->state != RTSP_STATE_IDLE)
+	{
+		if (unpause_source_pipeline(app))
+		{
+			g_signal_handlers_disconnect_by_func(queue, G_CALLBACK (queue_underrun), app);
+			g_signal_connect (queue, "overrun", G_CALLBACK (queue_overrun), app);
+			app->tcp_upstream->state = UPSTREAM_STATE_TRANSMITTING;
+			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_TRANSMITTING));
+		}
+	}
+}
+
+static void queue_overrun (GstElement * queue, gpointer user_data)
+{
+	App *app = user_data;
+	GST_DEBUG_OBJECT (queue, "queue overrun");
+	if (queue == app->tcp_upstream->tstcpq && app->rtsp_server->state != RTSP_STATE_IDLE)
+	{
+		if (pause_source_pipeline(app))
+		{
+			g_signal_handlers_disconnect_by_func(queue, G_CALLBACK (queue_overrun), app);
+			g_signal_connect (queue, "underrun", G_CALLBACK (queue_underrun), app);
+			app->tcp_upstream->state = UPSTREAM_STATE_WAITING;
+			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_WAITING));
+		}
+	}
+}
+
 static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 {
 	App *app = user_data;
@@ -888,19 +925,6 @@ gboolean create_source_pipeline(App *app)
 	return gst_element_set_state (app->pipeline, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS;
 }
 
-gboolean upstream_connect_cb(App *app)
-{
-	if (app->tcp_upstream->state == UPSTREAM_STATE_CONNECTING)
-	{
-		app->tcp_upstream->state = UPSTREAM_STATE_RUNNING;
-		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", app->tcp_upstream->state));
-		GST_INFO ("upstream connect succeeded new upstreamState UPSTREAM_STATE_RUNNING");
-	}
-	else
-		GST_INFO ("upstream connect failed.");
-	return FALSE;
-}
-
 static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
 {
 	App *app = user_data;
@@ -909,7 +933,6 @@ static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo
 
 	GST_INFO ("injecting authorization on pad %s:%s, created token_buf %" GST_PTR_FORMAT "", GST_DEBUG_PAD_NAME (sinkpad), token_buf);
 	gst_pad_remove_probe (sinkpad, app->tcp_upstream->inject_id);
-	g_timeout_add_seconds (5, (GSourceFunc) upstream_connect_cb, app);
 	gst_pad_push (srcpad, gst_buffer_ref(token_buf));
 
 	return GST_PAD_PROBE_REMOVE;
@@ -940,7 +963,8 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		if (!(t->tstcpq && t->tcpsink ))
 		g_error ("Failed to create tcp upstream element(s):%s%s", t->tstcpq?"":"  ts queue", t->tcpsink?"":"  tcpclientsink" );
 
-		g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+		g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(4)*GST_SECOND, NULL);
+		g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
 
 		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(3)*GST_SECOND, NULL);
 		g_object_set (t->tcpsink, "blocksize", BLOCK_SIZE, NULL);
@@ -1257,8 +1281,6 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 		gst_element_get_state (GST_ELEMENT(app->aq), &astate, NULL, 1*GST_USECOND);
 		gst_element_get_state (GST_ELEMENT(app->vq), &vstate, NULL, 1*GST_USECOND);
 
-		GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb astate=%s vstate=%s", gst_element_state_get_name (astate), gst_element_state_get_name (vstate));
-
 		if (astate == GST_STATE_READY && vstate == GST_STATE_READY)
 		{
 			gst_object_ref (app->tsmux);
@@ -1272,16 +1294,9 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 	else if (element && element == app->tsmux)
 	{
 		gst_element_unlink (app->tsmux, app->tstee);
-		GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb unlinked");
-
 		gst_bin_remove (GST_BIN (app->pipeline), app->tsmux);
-		GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb removed");
-
 		gst_element_set_state (app->tsmux, GST_STATE_NULL);
-		GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb set state");
-
 		gst_object_unref (app->tsmux);
-		GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb unreffed");
 		app->tsmux = NULL;
 	}
 	return GST_PAD_PROBE_REMOVE;
@@ -1307,6 +1322,28 @@ gboolean halt_source_pipeline(App* app)
 	}
 	GST_WARNING("can't set sources to GST_STATE_READY!");
 	return FALSE;
+}
+
+gboolean pause_source_pipeline(App* app)
+{
+	GST_INFO_OBJECT(app, "pause_source_pipeline... setting sources to GST_STATE_PAUSED");
+
+	if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_NO_PREROLL && gst_element_set_state (app->vsrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_NO_PREROLL)
+		return TRUE;
+	GST_WARNING("can't set sources to GST_STATE_PAUSED!");
+	return FALSE;
+}
+
+gboolean unpause_source_pipeline(App* app)
+{
+	GST_INFO_OBJECT(app, "unpause_source_pipeline... setting sources to GST_STATE_PLAYING");
+
+	if (gst_element_set_state (app->asrc, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE || gst_element_set_state (app->vsrc, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
+	{
+		GST_WARNING("can't set sources to GST_STATE_PAUSED!");
+		return FALSE;
+	}
+	return TRUE;
 }
 
 GstRTSPFilterResult remove_media_filter_func (GstRTSPSession * sess, GstRTSPSessionMedia * session_media, gpointer user_data)
@@ -1471,32 +1508,22 @@ static GstPadProbeReturn upstream_pad_probe_unlink_cb (GstPad * pad, GstPadProbe
 		teepad = gst_pad_get_peer(pad);
 		gst_pad_unlink (teepad, pad);
 
-		gst_bin_remove (GST_BIN (app->pipeline), element);
-		gst_element_set_state (element, GST_STATE_NULL);
-		gst_object_unref (element);
-		element = NULL;
-
 		GstElement *tee = gst_pad_get_parent_element(teepad);
 		gst_element_release_request_pad (tee, teepad);
 		gst_object_unref (teepad);
 		gst_object_unref (tee);
 
 		gst_object_ref (t->tcpsink);
-		GstPad *sinkpad;
-		sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
-		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, upstream_pad_probe_unlink_cb, app, NULL);
-		gst_object_unref (sinkpad);
-	}
-	else if (element == t->tcpsink)
-	{
-		gst_element_unlink_many(t->tstcpq, t->tcpsink, NULL);
+		gst_element_unlink (t->tstcpq, t->tcpsink);
 		gst_bin_remove_many (GST_BIN (app->pipeline), t->tstcpq, t->tcpsink, NULL);
 
 		gst_element_set_state (t->tcpsink, GST_STATE_NULL);
 		gst_element_set_state (t->tstcpq, GST_STATE_NULL);
 
 		gst_object_unref (t->tstcpq);
-		gst_object_unref (element);
+		gst_object_unref (t->tcpsink);
+		t->tstcpq = NULL;
+		t->tcpsink = NULL;
 
 		if (app->rtsp_server->state == RTSP_STATE_DISABLED)
 			halt_source_pipeline(app);
