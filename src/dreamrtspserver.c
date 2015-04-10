@@ -43,6 +43,10 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 #define TS_PER_FRAME 7
 #define BLOCK_SIZE   TS_PER_FRAME*188
 #define TOKEN_LEN    36
+
+#define MAX_OVERRUNS 20
+#define OVERRUN_TIME G_GINT64_CONSTANT(10)*GST_SECOND
+
 typedef enum {
         INPUT_MODE_LIVE = 0,
         INPUT_MODE_HDMI_IN = 1,
@@ -59,7 +63,8 @@ typedef enum {
         UPSTREAM_STATE_DISABLED = 0,
         UPSTREAM_STATE_CONNECTING = 1,
         UPSTREAM_STATE_WAITING = 2,
-        UPSTREAM_STATE_TRANSMITTING = 3
+        UPSTREAM_STATE_TRANSMITTING = 3,
+        UPSTREAM_STATE_OVERLOAD = 4
 } upstreamState;
 
 typedef struct {
@@ -68,6 +73,9 @@ typedef struct {
 	gulong inject_id;
 	char token[TOKEN_LEN+1];
 	upstreamState state;
+	guint overrun_counter;
+	GstClockTime overrun_period;
+	guint id_signal_waiting;
 } DreamTCPupstream;
 
 typedef struct {
@@ -710,6 +718,18 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 	g_mutex_unlock (&app->rtsp_mutex);
 }
 
+gboolean upstream_set_waiting(App *app)
+{
+	app->tcp_upstream->overrun_counter = 0;
+	app->tcp_upstream->overrun_period = GST_CLOCK_TIME_NONE;
+	app->tcp_upstream->state = UPSTREAM_STATE_WAITING;
+	send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_WAITING));
+	g_signal_handlers_disconnect_by_func(app->tcp_upstream->tstcpq, G_CALLBACK (queue_overrun), app);
+	g_signal_connect (app->tcp_upstream->tstcpq, "underrun", G_CALLBACK (queue_underrun), app);
+	pause_source_pipeline(app);
+	return FALSE;
+}
+
 static void queue_underrun (GstElement * queue, gpointer user_data)
 {
 	App *app = user_data;
@@ -718,10 +738,12 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 	{
 		if (unpause_source_pipeline(app))
 		{
-			g_signal_handlers_disconnect_by_func(queue, G_CALLBACK (queue_underrun), app);
+			g_signal_handlers_disconnect_by_func (queue, G_CALLBACK (queue_underrun), app);
 			g_signal_connect (queue, "overrun", G_CALLBACK (queue_overrun), app);
 			app->tcp_upstream->state = UPSTREAM_STATE_TRANSMITTING;
 			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_TRANSMITTING));
+			if (app->tcp_upstream->overrun_period == GST_CLOCK_TIME_NONE)
+				app->tcp_upstream->overrun_period = gst_clock_get_time (app->clock);
 		}
 	}
 }
@@ -729,15 +751,38 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 static void queue_overrun (GstElement * queue, gpointer user_data)
 {
 	App *app = user_data;
-	GST_DEBUG_OBJECT (queue, "queue overrun");
-	if (queue == app->tcp_upstream->tstcpq && app->rtsp_server->state != RTSP_STATE_IDLE)
+	DreamTCPupstream *t = app->tcp_upstream;
+	if (queue == t->tstcpq && app->rtsp_server->state != RTSP_STATE_IDLE)
 	{
-		if (pause_source_pipeline(app))
+		if (t->state == UPSTREAM_STATE_CONNECTING)
 		{
-			g_signal_handlers_disconnect_by_func(queue, G_CALLBACK (queue_overrun), app);
-			g_signal_connect (queue, "underrun", G_CALLBACK (queue_underrun), app);
-			app->tcp_upstream->state = UPSTREAM_STATE_WAITING;
-			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_WAITING));
+			GST_DEBUG_OBJECT (queue, "initial queue overrun after connect");
+			upstream_set_waiting (app);
+		}
+		else if (t->state == UPSTREAM_STATE_TRANSMITTING)
+		{
+			t->overrun_counter++;
+
+			if (app->tcp_upstream->id_signal_waiting)
+				g_source_remove (app->tcp_upstream->id_signal_waiting);
+
+			GstClockTime now = gst_clock_get_time (app->clock);
+			GST_DEBUG_OBJECT (queue, "queue overrun during transmit... %i (max %i) overruns within %" GST_TIME_FORMAT "", t->overrun_counter, MAX_OVERRUNS, GST_TIME_ARGS (now-app->tcp_upstream->overrun_period));
+			if (t->overrun_counter >= MAX_OVERRUNS)
+			{
+				app->tcp_upstream->state = UPSTREAM_STATE_OVERLOAD;
+				send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_OVERLOAD));
+			}
+			else
+			{
+				app->tcp_upstream->id_signal_waiting = g_timeout_add_seconds (5, (GSourceFunc) upstream_set_waiting, app);
+			}
+
+			if (now > t->overrun_period+OVERRUN_TIME)
+			{
+				t->overrun_counter = 0;
+				t->overrun_period = now;
+			}
 		}
 	}
 }
@@ -954,6 +999,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 	{
 		assert_tsmux (app);
 
+		t->id_signal_waiting = 0;
 		t->state = UPSTREAM_STATE_CONNECTING;
                 send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
 
