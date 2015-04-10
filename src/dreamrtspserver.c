@@ -33,11 +33,11 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 
 #define AAPPSINK "aappsink"
 #define VAPPSINK "vappsink"
+#define TSAPPSINK "tsappsink"
 
 #define ES_AAPPSRC "es_aappsrc"
 #define ES_VAPPSRC "es_vappsrc"
-#define TS_AAPPSRC "ts_aappsrc"
-#define TS_VAPPSRC "ts_vappsrc"
+#define TS_APPSRC "ts_appsrc"
 
 #define TS_PACK_SIZE 188
 #define TS_PER_FRAME 7
@@ -62,14 +62,11 @@ typedef enum {
 } upstreamState;
 
 typedef struct {
-	GstElement *atcpq, *vtcpq, *tsq;
-	GstElement *tsmux;
+	GstElement *tstcpq;
 	GstElement *tcpsink;
-	GstElement *upstreambin;
 	gulong inject_id;
 	char token[TOKEN_LEN+1];
 	upstreamState state;
-	int removing;
 } DreamTCPupstream;
 
 typedef struct {
@@ -77,8 +74,10 @@ typedef struct {
 	GstRTSPMountPoints *mounts;
 	GstRTSPMediaFactory *es_factory, *ts_factory;
 	GstRTSPMedia *es_media, *ts_media;
+	GstElement *artspq, *vrtspq, *tsrtspq;
 	GstElement *es_aappsrc, *es_vappsrc;
-	GstElement *ts_aappsrc, *ts_vappsrc;
+	GstElement *ts_appsrc;
+	GstElement *aappsink, *vappsink, *tsappsink;
 	GstClockTime rtsp_start_pts, rtsp_start_dts;
 	gchar *rtsp_user, *rtsp_pass;
 	GList *clients_list;
@@ -92,9 +91,12 @@ typedef struct {
 	GDBusConnection *dbus_connection;
 	GMainLoop *loop;
 
-	GstElement *pipeline, *aappsink, *vappsink;
-	GstElement *asrc, *vsrc, *artspq, *vrtspq, *aparse, *vparse;
-	GstElement *atee, *vtee;
+	GstElement *pipeline;
+	GstElement *asrc, *vsrc;
+	GstElement *aparse, *vparse;
+	GstElement *aq, *vq;
+	GstElement *atee, *vtee, *tstee;
+	GstElement *tsmux;
 
 	DreamTCPupstream *tcp_upstream;
 	DreamRTSPserver *rtsp_server;
@@ -146,12 +148,11 @@ static const gchar introspection_xml[] =
   "</node>";
 
 gboolean create_source_pipeline(App *app);
-gboolean pause_source_pipeline(App *app);
+gboolean halt_source_pipeline(App *app);
 DreamRTSPserver *create_rtsp_server(App *app);
 gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gchar *user, const gchar *pass);
 gboolean disable_rtsp_server(App *app);
 gboolean start_rtsp_pipeline(App *app);
-gboolean stop_rtsp_pipeline(App *app);
 gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstream_port, const gchar *token);
 gboolean disable_tcp_upstream(App *app);
 gboolean destroy_pipeline(App *app);
@@ -634,11 +635,24 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	App *app = user_data;
 	DreamRTSPserver *r = app->rtsp_server;
 	GST_INFO("no more clients -> media unprepared!");
-	stop_rtsp_pipeline(app);
+
 	g_mutex_lock (&app->rtsp_mutex);
-	r->es_media = NULL;
-	r->es_aappsrc = r->es_vappsrc = NULL;
-	r->state = RTSP_STATE_IDLE;
+	if (media == r->es_media)
+	{
+		r->es_media = NULL;
+		r->es_aappsrc = r->es_vappsrc = NULL;
+	}
+	else if (media == r->ts_media)
+	{
+		r->ts_media = NULL;
+		r->ts_appsrc = r->ts_appsrc = NULL;
+	}
+	if (!r->es_media && !r->ts_media)
+	{
+		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
+			halt_source_pipeline(app);
+		r->state = RTSP_STATE_IDLE;
+	}
 	g_mutex_unlock (&app->rtsp_mutex);
 }
 
@@ -679,12 +693,11 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 	{
 		r->ts_media = media;
 		GstElement *element = gst_rtsp_media_get_element (media);
-		r->ts_aappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), TS_AAPPSRC);
-		r->ts_vappsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), TS_VAPPSRC);
+		r->ts_appsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), TS_APPSRC);
+		r->ts_appsrc = gst_bin_get_by_name_recurse_up (GST_BIN (element), TS_APPSRC);
 		gst_object_unref(element);
 		g_signal_connect (media, "unprepared", (GCallback) media_unprepare, app);
-		g_object_set (r->ts_aappsrc, "format", GST_FORMAT_TIME, NULL);
-		g_object_set (r->ts_vappsrc, "format", GST_FORMAT_TIME, NULL);
+		g_object_set (r->ts_appsrc, "format", GST_FORMAT_TIME, NULL);
 	}
 	r->rtsp_start_pts = r->rtsp_start_dts = GST_CLOCK_TIME_NONE;
 	r->state = RTSP_STATE_RUNNING;
@@ -698,25 +711,20 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 	DreamRTSPserver *r = app->rtsp_server;
 
 	g_mutex_lock (&app->rtsp_mutex);
-	GstAppSrc *es_appsrc, *ts_appsrc;
-	es_appsrc = ts_appsrc = NULL;
-	if ( appsink == app->vappsink )
-	{
-		es_appsrc = GST_APP_SRC(r->es_vappsrc);
-		ts_appsrc = GST_APP_SRC(r->ts_vappsrc);
-	}
-	else if ( appsink == app->aappsink )
-	{
-		es_appsrc = GST_APP_SRC(r->es_aappsrc);
-		ts_appsrc = GST_APP_SRC(r->ts_aappsrc);
-	}
+	GstAppSrc *appsrc = NULL;
+	if ( appsink == r->vappsink )
+		appsrc = GST_APP_SRC(r->es_vappsrc);
+	else if ( appsink == r->aappsink )
+		appsrc = GST_APP_SRC(r->es_aappsrc);
+	else if ( appsink == r->tsappsink )
+		appsrc = GST_APP_SRC(r->ts_appsrc);
 
 	GstSample *sample = gst_app_sink_pull_sample (GST_APP_SINK (appsink));
-	if ((es_appsrc || ts_appsrc) && g_list_length(r->clients_list) > 0) {
+	if (appsrc && g_list_length(r->clients_list) > 0) {
 		GstBuffer *buffer = gst_sample_get_buffer (sample);
 		GstCaps *caps = gst_sample_get_caps (sample);
 
-		GST_LOG("original PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT" %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), es_appsrc, ts_appsrc);
+		GST_LOG_OBJECT(appsink, "original PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), appsrc);
 		if (r->rtsp_start_pts == GST_CLOCK_TIME_NONE) {
 			if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
 			{
@@ -725,11 +733,11 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 				g_mutex_unlock (&app->rtsp_mutex);
 				return GST_FLOW_OK;
 			}
-			else if (appsink == app->vappsink)
+			else if (appsink == r->vappsink)
 			{
 				r->rtsp_start_pts = GST_BUFFER_PTS (buffer);
 				r->rtsp_start_dts = GST_BUFFER_DTS (buffer);
-				GST_DEBUG("frame is IFRAME! set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT" %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), es_appsrc, ts_appsrc);
+				GST_LOG_OBJECT(appsink, "frame is IFRAME! set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), appsrc);
 			}
 		}
 		if (GST_BUFFER_PTS (buffer) < r->rtsp_start_pts)
@@ -739,35 +747,20 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		GST_BUFFER_DTS (buffer) -= r->rtsp_start_dts;
 		//    GST_LOG("new PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT "", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)));
 
-
 		GstCaps *oldcaps;
 
-		if (es_appsrc)
+		oldcaps = gst_app_src_get_caps (appsrc);
+		if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
 		{
-			oldcaps = gst_app_src_get_caps (es_appsrc);
-			if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
-			{
-				GST_LOG("CAPS changed! %" GST_PTR_FORMAT " to %" GST_PTR_FORMAT, oldcaps, caps);
-				gst_app_src_set_caps (es_appsrc, caps);
-			}
-			gst_app_src_push_buffer (es_appsrc, gst_buffer_ref(buffer));
+			GST_LOG("CAPS changed! %" GST_PTR_FORMAT " to %" GST_PTR_FORMAT, oldcaps, caps);
+			gst_app_src_set_caps (appsrc, caps);
 		}
-
-		if (ts_appsrc)
-		{
-			oldcaps = gst_app_src_get_caps (ts_appsrc);
-			if (!oldcaps || !gst_caps_is_equal (oldcaps, caps))
-			{
-				GST_LOG("CAPS changed! %" GST_PTR_FORMAT " to %" GST_PTR_FORMAT, oldcaps, caps);
-				gst_app_src_set_caps (ts_appsrc, caps);
-			}
-			gst_app_src_push_buffer (ts_appsrc, gst_buffer_ref(buffer));
-		}
+		gst_app_src_push_buffer (appsrc, gst_buffer_ref(buffer));
 	}
 	else
 	{
 		if ( gst_debug_category_get_threshold (dreamrtspserver_debug) >= GST_LEVEL_LOG)
-			GST_LOG("no rtsp clients, discard payload!");
+			GST_LOG_OBJECT(appsink, "no rtsp clients, discard payload!");
 		else
 			g_print (".");
 	}
@@ -775,6 +768,42 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 	g_mutex_unlock (&app->rtsp_mutex);
 
 	return GST_FLOW_OK;
+}
+
+void assert_tsmux(App *app)
+{
+	if (app->tsmux)
+		return;
+
+	GST_INFO_OBJECT (app, "inserting tsmux");
+
+	app->tsmux = gst_element_factory_make ("mpegtsmux", NULL);
+	gst_bin_add (GST_BIN (app->pipeline), app->tsmux);
+
+	GstPad *sinkpad, *srcpad;
+	GstPadLinkReturn ret;
+
+	GST_INFO ("aq % " GST_PTR_FORMAT " ! mpegtsmux %" GST_PTR_FORMAT "", app->aq, app->tsmux);
+
+	srcpad = gst_element_get_static_pad (app->aq, "src");
+	sinkpad = gst_element_get_compatible_pad (app->tsmux, srcpad, NULL);
+	GST_INFO ("link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
+	ret = gst_pad_link (srcpad, sinkpad);
+	if (ret != GST_PAD_LINK_OK)
+		g_error ("couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
+	gst_object_unref (srcpad);
+	gst_object_unref (sinkpad);
+
+	srcpad = gst_element_get_static_pad (app->vq, "src");
+	sinkpad = gst_element_get_compatible_pad (app->tsmux, srcpad, NULL);
+	ret = gst_pad_link (srcpad, sinkpad);
+	if (ret != GST_PAD_LINK_OK)
+		g_error ("couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
+	gst_object_unref (srcpad);
+	gst_object_unref (sinkpad);
+
+	if (!gst_element_link (app->tsmux, app->tstee))
+		g_error ("couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", app->tsmux, app->tstee);
 }
 
 gboolean create_source_pipeline(App *app)
@@ -794,78 +823,63 @@ gboolean create_source_pipeline(App *app)
 	app->aparse = gst_element_factory_make ("aacparse", NULL);
 	app->vparse = gst_element_factory_make ("h264parse", NULL);
 
-	app->artspq = gst_element_factory_make ("queue", "artspq");
-	app->vrtspq = gst_element_factory_make ("queue", "vrtspq");
+	app->atee = gst_element_factory_make ("tee", "atee");
+	app->vtee = gst_element_factory_make ("tee", "vtee");
+	app->tstee = gst_element_factory_make ("tee", "tstee");
 
-	app->atee = gst_element_factory_make ("tee", NULL);
-	app->vtee = gst_element_factory_make ("tee", NULL);
+	app->aq = gst_element_factory_make ("queue", "aqueue");
+	app->vq = gst_element_factory_make ("queue", "vqueue");
 
-	if (!(app->asrc && app->vsrc && app->aparse && app->vparse && app->artspq && app->vrtspq && app->atee && app->vtee))
+	app->tsmux = gst_element_factory_make ("mpegtsmux", NULL);
+
+	if (!(app->asrc && app->vsrc && app->aparse && app->vparse && app->aq && app->vq && app->atee && app->vtee))
 	{
-		g_error ("Failed to create source pipeline element(s):%s%s%s%s%s%s%s%s", app->asrc?"":" dreamaudiosource", app->vsrc?"":" dreamvideosource", app->aparse?"":" aacparse",
-			app->vparse?"":" h264parse", app->artspq?"":" aqueue", app->vrtspq?"":" vqueue", app->atee?"":" atee", app->vtee?"":" vtee");
+		g_error ("Failed to create source pipeline element(s):%s%s%s%s%s%s%s%s%s", app->asrc?"":" dreamaudiosource", app->vsrc?"":" dreamvideosource", app->aparse?"":" aacparse",
+			app->vparse?"":" h264parse", app->aq?"":" aqueue", app->vq?"":" vqueue", app->atee?"":" atee", app->vtee?"":" vtee", app->tsmux?"":"  mpegtsmux");
 	}
+	gst_object_unref(app->tsmux);
+	app->tsmux = NULL;
 
-	app->aappsink = gst_element_factory_make ("appsink", AAPPSINK);
-	app->vappsink = gst_element_factory_make ("appsink", VAPPSINK);
-
-	GstElement *appsrc, *vpay, *apay, *udpsrc;
+	GstElement *appsink, *appsrc, *vpay, *apay, *udpsrc;
+	appsink = gst_element_factory_make ("appsink", NULL);
 	appsrc = gst_element_factory_make ("appsrc", NULL);
 	vpay = gst_element_factory_make ("rtph264pay", NULL);
 	apay = gst_element_factory_make ("rtpmp4apay", NULL);
 	udpsrc = gst_element_factory_make ("udpsrc", NULL);
 
-	if (!(app->aappsink && app->vappsink && appsrc && vpay && apay && udpsrc))
-		g_error ("Failed to create rtsp element(s):%s%s%s%s%s%s", app->aappsink?"":" aappsink", app->vappsink?"":" vappsink", appsrc?"":" appsrc", vpay?"": "rtph264pay", apay?"":" rtpmp4apay", udpsrc?"":" udpsrc" );
+	if (!(appsink && appsrc && vpay && apay && udpsrc))
+		g_error ("Failed to create rtsp element(s):%s%s%s%s%s", appsink?"":" appsink", appsrc?"":" appsrc", vpay?"": "rtph264pay", apay?"":" rtpmp4apay", udpsrc?"":" udpsrc" );
 	else
 	{
+		gst_object_unref (appsink);
 		gst_object_unref (appsrc);
 		gst_object_unref (vpay);
 		gst_object_unref (apay);
 		gst_object_unref (udpsrc);
 	}
 
-	gst_bin_add_many (GST_BIN (app->pipeline), app->asrc, app->vsrc, app->aparse, app->vparse, app->atee, app->vtee, NULL);
+	gst_bin_add_many (GST_BIN (app->pipeline), app->asrc, app->aparse, app->atee, app->aq, NULL);
+	gst_bin_add_many (GST_BIN (app->pipeline), app->vsrc, app->vparse, app->vtee, app->vq, NULL);
+	gst_bin_add (GST_BIN (app->pipeline), app->tstee);
 	gst_element_link_many (app->asrc, app->aparse, app->atee, NULL);
 	gst_element_link_many (app->vsrc, app->vparse, app->vtee, NULL);
 
-	gst_bin_add_many (GST_BIN (app->pipeline), app->aappsink, app->vappsink, app->artspq, app->vrtspq, NULL);
-	gst_element_link (app->artspq, app->aappsink);
-	gst_element_link (app->vrtspq, app->vappsink);
-
-	g_object_set (G_OBJECT (app->artspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
-	g_object_set (G_OBJECT (app->vrtspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
-
-	g_object_set (G_OBJECT (app->aappsink), "emit-signals", TRUE, NULL);
-	g_object_set (G_OBJECT (app->aappsink), "enable-last-sample", FALSE, NULL);
-// 	g_object_set (G_OBJECT (app->aappsink), "sync", FALSE, NULL);
-	g_signal_connect (app->aappsink, "new-sample", G_CALLBACK (handover_payload), app);
-
-	g_object_set (G_OBJECT (app->vappsink), "emit-signals", TRUE, NULL);
-	g_object_set (G_OBJECT (app->vappsink), "enable-last-sample", FALSE, NULL);
-// 	g_object_set (G_OBJECT (app->vappsink), "sync", FALSE, NULL);
-	g_signal_connect (app->vappsink, "new-sample", G_CALLBACK (handover_payload), app);
-
 	GstPad *teepad, *sinkpad;
 	GstPadLinkReturn ret;
+
 	teepad = gst_element_get_request_pad (app->atee, "src_%u");
-	sinkpad = gst_element_get_static_pad (app->artspq, "sink");
+	sinkpad = gst_element_get_static_pad (app->aq, "sink");
 	ret = gst_pad_link (teepad, sinkpad);
 	if (ret != GST_PAD_LINK_OK)
-	{
-		GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", teepad, sinkpad);
-		return FALSE;
-	}
+		g_error ("couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", teepad, sinkpad);
 	gst_object_unref (teepad);
 	gst_object_unref (sinkpad);
+
 	teepad = gst_element_get_request_pad (app->vtee, "src_%u");
-	sinkpad = gst_element_get_static_pad (app->vrtspq, "sink");
+	sinkpad = gst_element_get_static_pad (app->vq, "sink");
 	ret = gst_pad_link (teepad, sinkpad);
 	if (ret != GST_PAD_LINK_OK)
-	{
-		GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", teepad, sinkpad);
-		return FALSE;
-	}
+		g_error ("couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", teepad, sinkpad);
 	gst_object_unref (teepad);
 	gst_object_unref (sinkpad);
 
@@ -894,7 +908,7 @@ static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo
 {
 	App *app = user_data;
 	GstBuffer *token_buf = gst_buffer_new_wrapped (app->tcp_upstream->token, TOKEN_LEN);
-	GstPad * srcpad = gst_element_get_static_pad (app->tcp_upstream->tsq, "src");
+	GstPad * srcpad = gst_element_get_static_pad (app->tcp_upstream->tstcpq, "src");
 
 	GST_INFO ("injecting authorization on pad %s:%s, created token_buf %" GST_PTR_FORMAT "", GST_DEBUG_PAD_NAME (sinkpad), token_buf);
 	gst_pad_remove_probe (sinkpad, app->tcp_upstream->inject_id);
@@ -918,20 +932,18 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 
 	if (t->state == UPSTREAM_STATE_DISABLED)
 	{
-		t->removing = 0;
+		assert_tsmux (app);
+
 		t->state = UPSTREAM_STATE_CONNECTING;
                 send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
 
-		t->atcpq = gst_element_factory_make ("queue", "atcpqueue");
-		t->vtcpq = gst_element_factory_make ("queue", "vtcpqueue");
-		t->tsmux = gst_element_factory_make ("mpegtsmux", NULL);
-		t->tsq   = gst_element_factory_make ("queue", "tstcpqueue");
+		t->tstcpq   = gst_element_factory_make ("queue", "tstcpqueue");
 		t->tcpsink = gst_element_factory_make ("tcpclientsink", NULL);
 
-		if (!(t->atcpq && t->vtcpq && t->tsmux && t->tcpsink ))
-		g_error ("Failed to create tcp upstream element(s):%s%s%s%s", t->atcpq?"":"  audio queue", t->vtcpq?"":"  video queue", t->tsmux?"":"  mpegtsmux", t->tcpsink?"":"  tcpclientsink" );
+		if (!(t->tstcpq && t->tcpsink ))
+		g_error ("Failed to create tcp upstream element(s):%s%s", t->tstcpq?"":"  ts queue", t->tcpsink?"":"  tcpclientsink" );
 
-		g_object_set (G_OBJECT (t->tsq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+		g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 
 		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(3)*GST_SECOND, NULL);
 		g_object_set (t->tcpsink, "blocksize", BLOCK_SIZE, NULL);
@@ -960,22 +972,17 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		if (sret == GST_STATE_CHANGE_FAILURE)
 		{
 			GST_ERROR_OBJECT (app, "failed to set tcpsink to GST_STATE_READY. %s:%d probably refused connection", upstream_host, upstream_port);
-			gst_object_unref (t->tsmux);
-			gst_object_unref (t->tsq);
+			gst_object_unref (t->tstcpq);
 			gst_object_unref (t->tcpsink);
-			gst_object_unref (t->vtcpq);
-			gst_object_unref (t->atcpq);
 			t->state = UPSTREAM_STATE_DISABLED;
 			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
 			return FALSE;
 		}
 
-		gst_bin_add_many (GST_BIN(app->pipeline), t->atcpq, t->vtcpq, t->tsmux, t->tsq, t->tcpsink, NULL);
-
 		GstPadLinkReturn ret;
 		GstPad *srcpad, *sinkpad;
-		srcpad = gst_element_get_request_pad (app->atee, "src_%u");
-		sinkpad = gst_element_get_static_pad (t->atcpq, "sink");
+		srcpad = gst_element_get_request_pad (app->tstee, "src_%u");
+		sinkpad = gst_element_get_static_pad (t->tstcpq, "sink");
 		ret = gst_pad_link (srcpad, sinkpad);
 		gst_object_unref (srcpad);
 		gst_object_unref (sinkpad);
@@ -984,43 +991,12 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
 			goto fail;
 		}
-		srcpad = gst_element_get_request_pad (app->vtee, "src_%u");
-		sinkpad = gst_element_get_static_pad (t->vtcpq, "sink");
-		ret = gst_pad_link (srcpad, sinkpad);
-		if (ret != GST_PAD_LINK_OK)
-		{
-			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
+
+		gst_bin_add_many (GST_BIN(app->pipeline), t->tstcpq, t->tcpsink, NULL);
+
+		if (!gst_element_link (t->tstcpq, t->tcpsink)) {
+			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", t->tstcpq, t->tcpsink);
 			goto fail;
-		}
-		gst_object_unref (srcpad);
-		gst_object_unref (sinkpad);
-
-		srcpad = gst_element_get_static_pad (t->atcpq, "src");
-		sinkpad = gst_element_get_compatible_pad (t->tsmux, srcpad, NULL);
-		ret = gst_pad_link (srcpad, sinkpad);
-		if (ret != GST_PAD_LINK_OK)
-		{
-			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
-			goto fail;
-		}
-
-		gst_object_unref (srcpad);
-		gst_object_unref (sinkpad);
-
-		srcpad = gst_element_get_static_pad (t->vtcpq, "src");
-		sinkpad = gst_element_get_compatible_pad (t->tsmux, srcpad, NULL);
-		ret = gst_pad_link (srcpad, sinkpad);
-		if (ret != GST_PAD_LINK_OK)
-		{
-			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
-			goto fail;
-		}
-
-		gst_object_unref (srcpad);
-		gst_object_unref (sinkpad);
-
-		if (!gst_element_link_many (t->tsmux, t->tsq, t->tcpsink, NULL)) {
-			g_error ("Failed to link tsmux to tcpclientsink");
 		}
 
 		if (strlen(token))
@@ -1030,7 +1006,6 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			t->inject_id = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) inject_authorization, app, NULL);
 			gst_object_unref (sinkpad);
 		}
-// 		sret = gst_element_set_state (t->tcpsink, GST_STATE_PLAYING);
 		sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
 
 		if (sret == GST_STATE_CHANGE_FAILURE)
@@ -1041,8 +1016,6 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		else if (sret == GST_STATE_CHANGE_ASYNC)
 		{
 			GstState state;
-//			gst_element_get_state (GST_ELEMENT(t->tcpsink), &state, NULL, 3*GST_SECOND);
-//			GST_DEBUG_OBJECT(app, "app->tcpsink's state=%s", gst_element_state_get_name (state));
                         gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);
 			GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_tcp_upstream");
 			GValue item = G_VALUE_INIT;
@@ -1080,8 +1053,7 @@ DreamRTSPserver *create_rtsp_server(App *app)
 	r->server = NULL;
 	r->ts_factory = r->es_factory = NULL;
 	r->ts_media = r->es_media = NULL;
-	r->ts_aappsrc = r->ts_vappsrc = NULL;
-	r->es_aappsrc = r->es_vappsrc = NULL;
+	r->ts_appsrc = r->es_aappsrc = r->es_vappsrc = NULL;
 	r->clients_list = NULL;
 	return r;
 }
@@ -1101,6 +1073,81 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 
 	if (r->state == RTSP_STATE_DISABLED)
 	{
+		r->artspq = gst_element_factory_make ("queue", "rtspaudioqueue");
+		r->vrtspq = gst_element_factory_make ("queue", "rtspvideoqueue");
+		r->aappsink = gst_element_factory_make ("appsink", AAPPSINK);
+		r->vappsink = gst_element_factory_make ("appsink", VAPPSINK);
+
+		gst_bin_add_many (GST_BIN (app->pipeline), r->artspq, r->vrtspq, r->aappsink, r->vappsink,  NULL);
+		gst_element_link (r->artspq, r->aappsink);
+		gst_element_link (r->vrtspq, r->vappsink);
+
+		g_object_set (G_OBJECT (r->artspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+		g_object_set (G_OBJECT (r->vrtspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+
+		g_object_set (G_OBJECT (r->aappsink), "emit-signals", TRUE, NULL);
+		g_object_set (G_OBJECT (r->aappsink), "enable-last-sample", FALSE, NULL);
+		g_signal_connect (r->aappsink, "new-sample", G_CALLBACK (handover_payload), app);
+
+		g_object_set (G_OBJECT (r->vappsink), "emit-signals", TRUE, NULL);
+		g_object_set (G_OBJECT (r->vappsink), "enable-last-sample", FALSE, NULL);
+		g_signal_connect (r->vappsink, "new-sample", G_CALLBACK (handover_payload), app);
+
+		r->tsrtspq = gst_element_factory_make ("queue", "tsrtspqueue");
+		r->tsappsink = gst_element_factory_make ("appsink", TSAPPSINK);
+		gst_bin_add_many (GST_BIN (app->pipeline), r->tsrtspq, r->tsappsink,  NULL);
+		gst_element_link (r->tsrtspq, r->tsappsink);
+
+		g_object_set (G_OBJECT (r->tsrtspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+
+		g_object_set (G_OBJECT (r->tsappsink), "emit-signals", TRUE, NULL);
+		g_object_set (G_OBJECT (r->tsappsink), "enable-last-sample", FALSE, NULL);
+		g_signal_connect (r->tsappsink, "new-sample", G_CALLBACK (handover_payload), app);
+
+		GstPad *teepad, *sinkpad;
+		GstPadLinkReturn ret;
+		teepad = gst_element_get_request_pad (app->atee, "src_%u");
+		sinkpad = gst_element_get_static_pad (r->artspq, "sink");
+		ret = gst_pad_link (teepad, sinkpad);
+		if (ret != GST_PAD_LINK_OK)
+		{
+			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", teepad, sinkpad);
+			goto fail;
+		}
+		gst_object_unref (teepad);
+		gst_object_unref (sinkpad);
+		teepad = gst_element_get_request_pad (app->vtee, "src_%u");
+		sinkpad = gst_element_get_static_pad (r->vrtspq, "sink");
+		ret = gst_pad_link (teepad, sinkpad);
+		if (ret != GST_PAD_LINK_OK)
+		{
+			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", teepad, sinkpad);
+			goto fail;
+		}
+		gst_object_unref (teepad);
+		gst_object_unref (sinkpad);
+		teepad = gst_element_get_request_pad (app->tstee, "src_%u");
+		sinkpad = gst_element_get_static_pad (r->tsrtspq, "sink");
+		ret = gst_pad_link (teepad, sinkpad);
+		if (ret != GST_PAD_LINK_OK)
+		{
+			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", teepad, sinkpad);
+			goto fail;
+		}
+		gst_object_unref (teepad);
+		gst_object_unref (sinkpad);
+
+		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
+		{
+			GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_READY);
+
+			if (sret != GST_STATE_CHANGE_SUCCESS)
+			{
+				GST_ERROR_OBJECT (app, "state change failure (%i) for local rtsp pipeline", sret);
+				return FALSE;
+			}
+		}
+
 		r->server = gst_rtsp_server_new ();
 		g_signal_connect (r->server, "client-connected", (GCallback) client_connected, app);
 
@@ -1111,7 +1158,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		g_signal_connect (r->es_factory, "media-configure", (GCallback) media_configure, app);
 
 		r->ts_factory = gst_rtsp_media_factory_new ();
-		gst_rtsp_media_factory_set_launch (r->ts_factory, "( appsrc name=" TS_VAPPSRC " ! queue ! h264parse ! mpegtsmux name=mux ! queue ! rtpmp2tpay name=pay0 pt=96   appsrc name=" TS_AAPPSRC " ! queue ! aacparse ! mux. )");
+		gst_rtsp_media_factory_set_launch (r->ts_factory, "( appsrc name=" TS_APPSRC " ! queue ! rtpmp2tpay name=pay0 pt=96 )");
 		gst_rtsp_media_factory_set_shared (r->ts_factory, TRUE);
 
 		g_signal_connect (r->ts_factory, "media-configure", (GCallback) media_configure, app);
@@ -1159,11 +1206,15 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		GST_INFO_OBJECT (app, "rtsp server already enabled!");
 	g_mutex_unlock (&app->rtsp_mutex);
 	return FALSE;
+
+fail:
+	disable_rtsp_server(app);
+	return FALSE;
 }
 
 gboolean start_rtsp_pipeline(App* app)
 {
-	GST_DEBUG_OBJECT(app, "start_rtsp_pipeline");
+	GST_DEBUG_OBJECT (app, "start_rtsp_pipeline");
 
 	DreamRTSPserver *r = app->rtsp_server;
 	if (r->state == RTSP_STATE_DISABLED)
@@ -1172,6 +1223,8 @@ gboolean start_rtsp_pipeline(App* app)
 		return FALSE;
 	}
 
+	assert_tsmux (app);
+
 	GstStateChangeReturn sret;
 	sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
 	if (sret == GST_STATE_CHANGE_FAILURE)
@@ -1179,25 +1232,82 @@ gboolean start_rtsp_pipeline(App* app)
 		GST_ERROR_OBJECT (app, "GST_STATE_CHANGE_FAILURE for rtsp pipeline");
 		return FALSE;
 	}
-	GST_INFO_OBJECT(app, "started rtsp pipeline, pipeline is PLAYING");
+	GST_INFO_OBJECT(app, "started rtsp pipeline, pipeline going into PLAYING");
 	return TRUE;
 }
 
-gboolean stop_rtsp_pipeline(App* app)
+static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
 {
-	GST_INFO_OBJECT(app, "stop_rtsp_pipeline");
+	App *app = user_data;
 
-	if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
-		pause_source_pipeline(app);
-	return TRUE;
+	GstElement *element = gst_pad_get_parent_element(pad);
+	GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb % "GST_PTR_FORMAT, element);
+
+	if (element && (element == app->aq || element == app->vq))
+	{
+		GstPad *srcpad, *muxpad;
+		srcpad = gst_element_get_static_pad (element, "src");
+		muxpad = gst_pad_get_peer (srcpad);
+		gst_pad_unlink (srcpad, muxpad);
+		gst_element_release_request_pad (app->tsmux, muxpad);
+		gst_object_unref (srcpad);
+		gst_object_unref (muxpad);
+
+		gst_element_set_state (element, GST_STATE_READY);
+
+		GstState astate, vstate;
+		gst_element_get_state (GST_ELEMENT(app->aq), &astate, NULL, 1*GST_USECOND);
+		gst_element_get_state (GST_ELEMENT(app->vq), &vstate, NULL, 1*GST_USECOND);
+
+		GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb astate=%s vstate=%s", gst_element_state_get_name (astate), gst_element_state_get_name (vstate));
+
+		if (astate == GST_STATE_READY && vstate == GST_STATE_READY)
+		{
+			gst_object_ref (app->tsmux);
+			GstPad *sinkpad;
+			sinkpad = gst_element_get_static_pad (app->tsmux, "src");
+			gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, tsmux_pad_probe_unlink_cb, app, NULL);
+			gst_object_unref (sinkpad);
+		}
+	}
+
+	else if (element && element == app->tsmux)
+	{
+		gst_element_unlink (app->tsmux, app->tstee);
+		GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb unlinked");
+
+		gst_bin_remove (GST_BIN (app->pipeline), app->tsmux);
+		GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb removed");
+
+		gst_element_set_state (app->tsmux, GST_STATE_NULL);
+		GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb set state");
+
+		gst_object_unref (app->tsmux);
+		GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb unreffed");
+		app->tsmux = NULL;
+	}
+	return GST_PAD_PROBE_REMOVE;
 }
 
-gboolean pause_source_pipeline(App* app)
+gboolean halt_source_pipeline(App* app)
 {
-	GST_INFO_OBJECT(app, "pause_source_pipeline");
-	if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_NO_PREROLL && gst_element_set_state (app->vsrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_NO_PREROLL)
+	GST_INFO_OBJECT(app, "halt_source_pipeline... setting sources to GST_STATE_READY");
+
+	if (gst_element_set_state (app->asrc, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS && gst_element_set_state (app->vsrc, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS)
+	{
+		GstPad *sinkpad;
+		gst_object_ref (app->aq);
+		sinkpad = gst_element_get_static_pad (app->aq, "sink");
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, tsmux_pad_probe_unlink_cb, app, NULL);
+		gst_object_unref (sinkpad);
+
+		gst_object_ref (app->vq);
+		sinkpad = gst_element_get_static_pad (app->vq, "sink");
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, tsmux_pad_probe_unlink_cb, app, NULL);
+		gst_object_unref (sinkpad);
 		return TRUE;
-	GST_WARNING("can't set sources to GST_STATE_PAUSED!");
+	}
+	GST_WARNING("can't set sources to GST_STATE_READY!");
 	return FALSE;
 }
 
@@ -1246,6 +1356,60 @@ GstRTSPFilterResult remove_client_filter_func (GstRTSPServer *server, GstRTSPCli
 	return res;
 }
 
+
+static GstPadProbeReturn rtsp_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
+{
+	App *app = user_data;
+	DreamRTSPserver *r = app->rtsp_server;
+
+	GstElement *element = gst_pad_get_parent_element(pad);
+	GstElement *appsink;
+	if (element == r->vrtspq)
+		appsink = r->vappsink;
+	else if (element == r->artspq)
+		appsink = r->aappsink;
+	else if (element == r->tsrtspq)
+		appsink = r->tsappsink;
+
+	GST_LOG_OBJECT (pad, "unlink... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, appsink);
+
+	GstPad *teepad;
+	teepad = gst_pad_get_peer(pad);
+	gst_pad_unlink (teepad, pad);
+
+	GstElement *tee = gst_pad_get_parent_element(teepad);
+	gst_element_release_request_pad (tee, teepad);
+	gst_object_unref (teepad);
+	gst_object_unref (tee);
+
+	gst_element_unlink (element, appsink);
+
+	GST_LOG_OBJECT (pad, "remove... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, appsink);
+
+	gst_bin_remove_many (GST_BIN (app->pipeline), element, appsink, NULL);
+
+	GST_LOG_OBJECT (pad, "set state null %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, appsink);
+
+	gst_element_set_state (appsink, GST_STATE_NULL);
+	gst_element_set_state (element, GST_STATE_NULL);
+
+	GST_LOG_OBJECT (pad, "unref.... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, appsink);
+
+	gst_object_unref (element);
+	gst_object_unref (appsink);
+	element = NULL;
+	appsink = NULL;
+
+	if (!r->tsappsink && !r->aappsink && !r->vappsink)
+	{
+		GST_INFO("!r->tsappsink && !r->aappsink && !r->vappsink");
+		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
+			halt_source_pipeline(app);
+		GST_INFO("local rtsp server disabled!");
+	}
+	return GST_PAD_PROBE_REMOVE;
+}
+
 gboolean disable_rtsp_server(App *app)
 {
 	DreamRTSPserver *r = app->rtsp_server;
@@ -1269,6 +1433,25 @@ gboolean disable_rtsp_server(App *app)
 		g_free(r->rtsp_port);
 		g_free(r->rtsp_path);
 		r->state = RTSP_STATE_DISABLED;
+
+		gst_object_ref (r->tsrtspq);
+		gst_object_ref (r->artspq);
+		gst_object_ref (r->vrtspq);
+		gst_object_ref (r->tsappsink);
+		gst_object_ref (r->aappsink);
+		gst_object_ref (r->vappsink);
+
+		GstPad *sinkpad;
+		sinkpad = gst_element_get_static_pad (r->tsrtspq, "sink");
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, rtsp_pad_probe_unlink_cb, app, NULL);
+		gst_object_unref (sinkpad);
+		sinkpad = gst_element_get_static_pad (r->artspq, "sink");
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, rtsp_pad_probe_unlink_cb, app, NULL);
+		gst_object_unref (sinkpad);
+		sinkpad = gst_element_get_static_pad (r->vrtspq, "sink");
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, rtsp_pad_probe_unlink_cb, app, NULL);
+		gst_object_unref (sinkpad);
+
 		g_mutex_unlock (&app->rtsp_mutex);
 		GST_INFO("rtsp_server disabled!");
 		return TRUE;
@@ -1276,41 +1459,19 @@ gboolean disable_rtsp_server(App *app)
 	return FALSE;
 }
 
-static GstPadProbeReturn pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
+static GstPadProbeReturn upstream_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
 {
 	App *app = user_data;
 	DreamTCPupstream *t = app->tcp_upstream;
 
-	t->removing++;
-	GST_LOG_OBJECT (pad, "event_probe_unlink_cb removing=%i", t->removing);
-
 	GstElement *element = gst_pad_get_parent_element(pad);
+	GST_LOG_OBJECT (pad, "upstream_pad_probe_unlink_cb %" GST_PTR_FORMAT, element);
 
-	if (element == t->tcpsink)
+	if (element == t->tstcpq)
 	{
-		gst_element_unlink_many(t->tsmux, t->tsq, t->tcpsink, NULL);
-		gst_bin_remove_many (GST_BIN (app->pipeline), t->tsmux, t->tsq, t->tcpsink, NULL);
-
-		gst_element_set_state (t->tcpsink, GST_STATE_NULL);
-		gst_element_set_state (t->tsmux, GST_STATE_NULL);
-		gst_element_set_state (t->tsq, GST_STATE_NULL);
-
-		gst_object_unref (t->tsq);
-		gst_object_unref (t->tsmux);
-		gst_object_unref (element);
-	}
-	else if (element && (element == t->atcpq || element == t->vtcpq))
-	{
-		GstPad *teepad, *srcpad, *muxpad;
+		GstPad *teepad;
 		teepad = gst_pad_get_peer(pad);
 		gst_pad_unlink (teepad, pad);
-
-		srcpad = gst_element_get_static_pad (element, "src");
-		muxpad = gst_pad_get_peer(srcpad);
-		gst_pad_unlink (srcpad, muxpad);
-		gst_element_release_request_pad (app->tcp_upstream->tsmux, muxpad);
-		gst_object_unref (srcpad);
-		gst_object_unref (muxpad);
 
 		gst_bin_remove (GST_BIN (app->pipeline), element);
 		gst_element_set_state (element, GST_STATE_NULL);
@@ -1321,22 +1482,26 @@ static GstPadProbeReturn pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * in
 		gst_element_release_request_pad (tee, teepad);
 		gst_object_unref (teepad);
 		gst_object_unref (tee);
-	}
 
-	if (t->removing == 2)
-	{
-		gst_object_ref (t->tsmux);
 		gst_object_ref (t->tcpsink);
-		gst_object_ref (t->tsq);
 		GstPad *sinkpad;
 		sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
-		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, pad_probe_unlink_cb, app, NULL);
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, upstream_pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);
 	}
-	else if (t->removing == 3)
+	else if (element == t->tcpsink)
 	{
+		gst_element_unlink_many(t->tstcpq, t->tcpsink, NULL);
+		gst_bin_remove_many (GST_BIN (app->pipeline), t->tstcpq, t->tcpsink, NULL);
+
+		gst_element_set_state (t->tcpsink, GST_STATE_NULL);
+		gst_element_set_state (t->tstcpq, GST_STATE_NULL);
+
+		gst_object_unref (t->tstcpq);
+		gst_object_unref (element);
+
 		if (app->rtsp_server->state == RTSP_STATE_DISABLED)
-			pause_source_pipeline(app);
+			halt_source_pipeline(app);
 		GST_INFO("tcp_upstream disabled!");
 		t->state = UPSTREAM_STATE_DISABLED;
 		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
@@ -1350,18 +1515,11 @@ gboolean disable_tcp_upstream(App *app)
 	DreamTCPupstream *t = app->tcp_upstream;
 	if (t->state >= UPSTREAM_STATE_CONNECTING)
 	{
-		gst_object_ref (t->atcpq);
-		gst_object_ref (t->vtcpq);
-
+		gst_object_ref (t->tstcpq);
 		GstPad *sinkpad;
-		sinkpad = gst_element_get_static_pad (t->atcpq, "sink");
-		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, pad_probe_unlink_cb, app, NULL);
+		sinkpad = gst_element_get_static_pad (t->tstcpq, "sink");
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, upstream_pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);
-
-		sinkpad = gst_element_get_static_pad (t->vtcpq, "sink");
-		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, pad_probe_unlink_cb, app, NULL);
-		gst_object_unref (sinkpad);
-
 		return TRUE;
 	}
 	return FALSE;
@@ -1437,16 +1595,16 @@ int main (int argc, char *argv[])
 
 	g_main_loop_run (app.loop);
 
-	destroy_pipeline(&app);
-
-	g_main_loop_unref (app.loop);
-
 	free(app.tcp_upstream);
 	if (app.rtsp_server->state >= RTSP_STATE_IDLE)
 		disable_rtsp_server(&app);
 	if (app.rtsp_server->clients_list)
 		g_list_free (app.rtsp_server->clients_list);
 	free(app.rtsp_server);
+
+	destroy_pipeline(&app);
+
+	g_main_loop_unref (app.loop);
 
 	g_mutex_clear (&app.rtsp_mutex);
 
