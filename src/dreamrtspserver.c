@@ -998,6 +998,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 	if (t->state == UPSTREAM_STATE_DISABLED)
 	{
 		assert_tsmux (app);
+		g_mutex_lock (&app->rtsp_mutex);
 
 		t->id_signal_waiting = 0;
 		t->state = UPSTREAM_STATE_CONNECTING;
@@ -1043,6 +1044,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			gst_object_unref (t->tcpsink);
 			t->state = UPSTREAM_STATE_DISABLED;
 			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
+			g_mutex_unlock (&app->rtsp_mutex);
 			return FALSE;
 		}
 
@@ -1102,6 +1104,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			}
 		}
 		GST_INFO_OBJECT(app, "enabled TCP upstream! upstreamState = UPSTREAM_STATE_CONNECTING");
+		g_mutex_unlock (&app->rtsp_mutex);
 		return TRUE;
 	}
 	else
@@ -1109,6 +1112,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 	return FALSE;
 
 fail:
+	g_mutex_unlock (&app->rtsp_mutex);
 	disable_tcp_upstream(app);
 	return FALSE;
 }
@@ -1351,6 +1355,7 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 gboolean halt_source_pipeline(App* app)
 {
 	GST_INFO_OBJECT(app, "halt_source_pipeline... setting sources to GST_STATE_READY");
+	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"halt_source_pipeline_pre");
 
 	if (gst_element_set_state (app->asrc, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS && gst_element_set_state (app->vsrc, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS)
 	{
@@ -1548,10 +1553,15 @@ static GstPadProbeReturn upstream_pad_probe_unlink_cb (GstPad * pad, GstPadProbe
 	GstElement *element = gst_pad_get_parent_element(pad);
 	GST_LOG_OBJECT (pad, "upstream_pad_probe_unlink_cb %" GST_PTR_FORMAT, element);
 
-	if (element == t->tstcpq)
+	if (element && element == t->tstcpq)
 	{
 		GstPad *teepad;
 		teepad = gst_pad_get_peer(pad);
+		if (!teepad)
+		{
+			GST_ERROR_OBJECT (pad, "has no peer! tstcpq=%" GST_PTR_FORMAT", tcpsink=%" GST_PTR_FORMAT", tee=%" GST_PTR_FORMAT,t->tstcpq, t->tcpsink, app->tstee);
+			return GST_PAD_PROBE_REMOVE;
+		}
 		gst_pad_unlink (teepad, pad);
 
 		GstElement *tee = gst_pad_get_parent_element(teepad);
@@ -1577,6 +1587,7 @@ static GstPadProbeReturn upstream_pad_probe_unlink_cb (GstPad * pad, GstPadProbe
 		t->state = UPSTREAM_STATE_DISABLED;
 		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
 	}
+	GST_LOG_OBJECT (pad, "upstream_pad_probe_unlink_cb returns GST_PAD_PROBE_REMOVE");
 	return GST_PAD_PROBE_REMOVE;
 }
 
@@ -1589,7 +1600,8 @@ gboolean disable_tcp_upstream(App *app)
 		gst_object_ref (t->tstcpq);
 		GstPad *sinkpad;
 		sinkpad = gst_element_get_static_pad (t->tstcpq, "sink");
-		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, upstream_pad_probe_unlink_cb, app, NULL);
+		gulong probe_id = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, upstream_pad_probe_unlink_cb, app, NULL);
+		GST_DEBUG("probe_id = %lu", probe_id);
 		gst_object_unref (sinkpad);
 		return TRUE;
 	}
