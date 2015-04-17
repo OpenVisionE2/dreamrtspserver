@@ -69,6 +69,11 @@ typedef struct {
 } DreamTCPupstream;
 
 typedef struct {
+	gint audioBitrate, videoBitrate;
+	guint framerate, width, height;
+} SourceProperties;
+
+typedef struct {
 	GDBusConnection *dbus_connection;
 	GMainLoop *loop;
 
@@ -78,6 +83,7 @@ typedef struct {
 	DreamTCPupstream *tcp_upstream;
 	GMutex rtsp_mutex;
 	GstClock *clock;
+	SourceProperties source_properties;
 } App;
 
 static const gchar service[] = "com.dreambox.RTSPserver";
@@ -218,9 +224,8 @@ out:
 	return ret;
 }
 
-static gboolean gst_get_capsprop(App *app, const gchar* element_name, const gchar* prop_name, guint32 *value)
+static gboolean gst_get_capsprop(App *app, GstElement *element, const gchar* prop_name, guint32 *value)
 {
-	GstElement *element = NULL;
 	GstCaps *caps = NULL;
 	const GstStructure *structure;
 	gboolean ret = FALSE;
@@ -228,8 +233,7 @@ static gboolean gst_get_capsprop(App *app, const gchar* element_name, const gcha
 	if (!app->pipeline)
 		goto out;
 
-	element = gst_bin_get_by_name(GST_BIN(app->pipeline), element_name);
-	if (!element)
+	if (!GST_IS_ELEMENT(element))
 		goto out;
 
 	g_object_get (G_OBJECT (element), "caps", &caps, NULL);
@@ -253,20 +257,51 @@ static gboolean gst_get_capsprop(App *app, const gchar* element_name, const gcha
 	}
 	else if ((g_strcmp0 (prop_name, "width") == 0 || g_strcmp0 (prop_name, "height") == 0) && value)
 	{
-		if (!gst_structure_get_uint (structure, prop_name, (guint*)value))
+		if (!gst_structure_get_int (structure, prop_name, (guint*)value))
 			*value = 0;
 	}
 	else
 		goto out;
 
-	GST_DEBUG("%s.%s = %i", element_name, prop_name, *value);
+	GST_DEBUG("%" GST_PTR_FORMAT"'s %s = %i", element, prop_name, *value);
 	ret = TRUE;
 out:
-	if (element)
-		gst_object_unref(element);
 	if (caps)
 		gst_caps_unref(caps);
 	return ret;
+}
+
+static void get_source_properties (App *app)
+{
+	SourceProperties *p = &app->source_properties;
+	if (app->asrc)
+		g_object_get (G_OBJECT (app->asrc), "bitrate", &p->audioBitrate, NULL);
+	if (app->vsrc)
+	{
+		g_object_get (G_OBJECT (app->vsrc), "bitrate", &p->videoBitrate, NULL);
+		gst_get_capsprop(app, app->vsrc, "width", &p->width);
+		gst_get_capsprop(app, app->vsrc, "height", &p->height);
+		gst_get_capsprop(app, app->vsrc, "framerate", &p->framerate);
+	}
+}
+
+static void apply_source_properties (App *app)
+{
+	SourceProperties *p = &app->source_properties;
+	if (app->asrc)
+	{
+		if (p->audioBitrate)
+			g_object_set (G_OBJECT (app->asrc), "bitrate", p->audioBitrate, NULL);
+	}
+	if (app->vsrc)
+	{
+		if (p->videoBitrate)
+			g_object_set (G_OBJECT (app->vsrc), "bitrate", p->videoBitrate, NULL);
+		if (p->framerate)
+			gst_set_framerate(app, p->framerate);
+		if (p->width && p->height)
+			gst_set_resolution(app,  p->width, p->height);
+	}
 }
 
 static GVariant *handle_get_property (GDBusConnection  *connection,
@@ -314,7 +349,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	else if (g_strcmp0 (property_name, "width") == 0 || g_strcmp0 (property_name, "height") == 0 || g_strcmp0 (property_name, "framerate") == 0)
 	{
 		guint32 value;
-		if (gst_get_capsprop(app, "dreamvideosource0", property_name, &value))
+		if (gst_get_capsprop(app, app->vsrc, property_name, &value))
 			return g_variant_new_int32(value);
 		GST_WARNING("can't handle_get_property name=%s", property_name);
 		return g_variant_new_int32(0);
@@ -659,7 +694,7 @@ gboolean create_source_pipeline(App *app)
 
 	app->aparse = gst_element_factory_make ("aacparse", NULL);
 	app->vparse = gst_element_factory_make ("h264parse", NULL);
-	
+
 	app->tsmux = gst_element_factory_make ("mpegtsmux", NULL);
 	app->tsq   = gst_element_factory_make ("queue", "tstcpqueue");
 
@@ -669,7 +704,6 @@ gboolean create_source_pipeline(App *app)
 	}
 
 	g_object_set (G_OBJECT (app->tsq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
-	g_signal_connect (app->tsq, "overrun", G_CALLBACK (queue_overrun), app);
 
 	gst_bin_add_many (GST_BIN (app->pipeline), app->asrc, app->vsrc, app->aparse, app->vparse, NULL);
 	gst_bin_add_many (GST_BIN (app->pipeline), app->tsmux, app->tsq, NULL);
@@ -709,6 +743,8 @@ gboolean create_source_pipeline(App *app)
 
 	app->clock = gst_system_clock_obtain();
 	gst_pipeline_use_clock(GST_PIPELINE (app->pipeline), app->clock);
+
+	apply_source_properties(app);
 
 	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"create_source_pipeline");
 	g_mutex_unlock (&app->rtsp_mutex);
@@ -873,26 +909,26 @@ static GstPadProbeReturn pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * in
 	GST_DEBUG_OBJECT (pad, "event_probe_unlink_cb type=%i", info->type);
 
 	GstElement *element = gst_pad_get_parent_element(pad);
-	
+
 	if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_IDLE && element && element == t->tcpsink)
 	{
 		GST_DEBUG_OBJECT (pad, "GST_PAD_PROBE_TYPE_IDLE -> unlink and remove tcpsink");
-		
+
 		pause_source_pipeline(app);
-		
+
 		gst_element_unlink(app->tsq, t->tcpsink);
 		gst_bin_remove (GST_BIN (app->pipeline), t->tcpsink);
 
 		gst_element_set_state (t->tcpsink, GST_STATE_NULL);
 		gst_object_unref (t->tcpsink);
-		
+
 		GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_PAUSED);
 		GST_INFO_OBJECT(app, "set_state paused ret=%i", sret);
 
 		GST_INFO("tcp_upstream disabled!");
 		t->state = UPSTREAM_STATE_DISABLED;
 		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
-		
+
 		ret = GST_PAD_PROBE_REMOVE;
 	}
 	return ret;
@@ -919,6 +955,7 @@ gboolean destroy_pipeline(App *app)
 	GST_DEBUG_OBJECT(app, "destroy_pipeline @%p", app->pipeline);
 	if (app->pipeline)
 	{
+		get_source_properties (app);
 		GstStateChangeReturn sret = gst_element_set_state (app->pipeline, GST_STATE_NULL);
 		if (sret == GST_STATE_CHANGE_ASYNC)
 		{
@@ -957,6 +994,8 @@ int main (int argc, char *argv[])
 			"Dreambox RTSP server daemon");
 
 	memset (&app, 0, sizeof(app));
+	memset (&app.source_properties, 0, sizeof(SourceProperties));
+
 	g_mutex_init (&app.rtsp_mutex);
 
 	introspection_data = g_dbus_node_info_new_for_xml (introspection_xml, NULL);
