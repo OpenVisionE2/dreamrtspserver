@@ -66,6 +66,7 @@ typedef struct {
 	guint overrun_counter;
 	GstClockTime overrun_period;
 	guint id_signal_waiting;
+	gulong resume_id;
 } DreamTCPupstream;
 
 typedef struct {
@@ -609,13 +610,26 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 	return TRUE;
 }
 
+static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
+{
+	App *app = user_data;
+	GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER (info);
+	if (GST_IS_BUFFER(buffer) && app->tcp_upstream->id_signal_waiting)
+	{
+		GST_DEBUG_OBJECT (app, "cancel upstream_set_waiting timeout because data flow was restored!");
+		g_source_remove (app->tcp_upstream->id_signal_waiting);
+		app->tcp_upstream->id_signal_waiting = 0;
+	}
+	return GST_PAD_PROBE_REMOVE;
+}
+
 gboolean upstream_set_waiting(App *app)
 {
-	app->tcp_upstream->overrun_counter = 0;
-	app->tcp_upstream->overrun_period = GST_CLOCK_TIME_NONE;
-	app->tcp_upstream->state = UPSTREAM_STATE_WAITING;
+	DreamTCPupstream *t = app->tcp_upstream;
+	t->overrun_counter = 0;
+	t->overrun_period = GST_CLOCK_TIME_NONE;
+	t->state = UPSTREAM_STATE_WAITING;
 	send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_WAITING));
-	g_signal_handlers_disconnect_by_func(app->tsq, G_CALLBACK (queue_overrun), app);
 	g_signal_connect (app->tsq, "underrun", G_CALLBACK (queue_underrun), app);
 	pause_source_pipeline(app);
 	return FALSE;
@@ -627,14 +641,15 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 	GST_DEBUG_OBJECT (queue, "queue underrun");
 	if (queue == app->tsq)
 	{
+		DreamTCPupstream *t = app->tcp_upstream;
 		if (unpause_source_pipeline(app))
 		{
 			g_signal_handlers_disconnect_by_func (queue, G_CALLBACK (queue_underrun), app);
 			g_signal_connect (queue, "overrun", G_CALLBACK (queue_overrun), app);
-			app->tcp_upstream->state = UPSTREAM_STATE_TRANSMITTING;
+			t->state = UPSTREAM_STATE_TRANSMITTING;
 			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_TRANSMITTING));
-			if (app->tcp_upstream->overrun_period == GST_CLOCK_TIME_NONE)
-				app->tcp_upstream->overrun_period = gst_clock_get_time (app->clock);
+			if (t->overrun_period == GST_CLOCK_TIME_NONE)
+				t->overrun_period = gst_clock_get_time (app->clock);
 		}
 	}
 }
@@ -648,6 +663,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 		if (t->state == UPSTREAM_STATE_CONNECTING)
 		{
 			GST_DEBUG_OBJECT (queue, "initial queue overrun after connect");
+			g_signal_handlers_disconnect_by_func(app->tsq, G_CALLBACK (queue_overrun), app);
 			upstream_set_waiting (app);
 		}
 		else if (t->state == UPSTREAM_STATE_TRANSMITTING)
@@ -655,7 +671,11 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 			t->overrun_counter++;
 
 			if (app->tcp_upstream->id_signal_waiting)
-				g_source_remove (app->tcp_upstream->id_signal_waiting);
+			{
+				g_signal_handlers_disconnect_by_func(app->tsq, G_CALLBACK (queue_overrun), app);
+				GST_DEBUG_OBJECT (queue, "disconnect overrun callback and wait for timeout or for buffer flow!");
+				return;
+			}
 
 			GstClockTime now = gst_clock_get_time (app->clock);
 			GST_DEBUG_OBJECT (queue, "queue overrun during transmit... %i (max %i) overruns within %" GST_TIME_FORMAT "", t->overrun_counter, MAX_OVERRUNS, GST_TIME_ARGS (now-app->tcp_upstream->overrun_period));
@@ -666,6 +686,10 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 			}
 			else
 			{
+				GST_DEBUG_OBJECT (queue, "SET upstream_set_waiting timeout!");
+				GstPad *sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
+				t->resume_id = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) cancel_waiting_probe, app, NULL);
+				gst_object_unref (sinkpad);
 				app->tcp_upstream->id_signal_waiting = g_timeout_add_seconds (5, (GSourceFunc) upstream_set_waiting, app);
 			}
 
@@ -781,7 +805,9 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		g_mutex_lock (&app->rtsp_mutex);
 
 		t->id_signal_waiting = 0;
+		t->resume_id = 0;
 		t->state = UPSTREAM_STATE_CONNECTING;
+		g_signal_connect (app->tsq, "overrun", G_CALLBACK (queue_overrun), app);
 		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
 
 		t->tcpsink = gst_element_factory_make ("tcpclientsink", NULL);
@@ -789,7 +815,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		if (!t->tcpsink)
 		g_error ("Failed to create tcp upstream element: %s", t->tcpsink?"":"  tcpclientsink" );
 
-		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(3)*GST_SECOND, NULL);
+		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(1)*GST_SECOND, NULL);
 		g_object_set (t->tcpsink, "blocksize", BLOCK_SIZE, NULL);
 
 		g_object_set (t->tcpsink, "host", upstream_host, NULL);
