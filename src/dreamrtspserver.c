@@ -43,6 +43,7 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 
 #define MAX_OVERRUNS 20
 #define OVERRUN_TIME G_GINT64_CONSTANT(10)*GST_SECOND
+#define BITRATE_AVG_PERIOD G_GINT64_CONSTANT(5)*GST_SECOND
 
 typedef enum {
         INPUT_MODE_LIVE = 0,
@@ -64,9 +65,10 @@ typedef struct {
 	char token[TOKEN_LEN+1];
 	upstreamState state;
 	guint overrun_counter;
-	GstClockTime overrun_period;
+	GstClockTime overrun_period, measure_start;
 	guint id_signal_waiting;
-	gulong resume_id;
+	gulong id_resume, id_bitrate_measure;
+	gsize bitrate_sum;
 } DreamTCPupstream;
 
 typedef struct {
@@ -116,6 +118,9 @@ static const gchar introspection_xml[] =
   "    <signal name='encoderError'/>"
   "    <signal name='upstreamStateChanged'>"
   "      <arg type='i' name='state' direction='out'/>"
+  "    </signal>"
+  "    <signal name='tcpBitrate'>"
+  "      <arg type='i' name='kbps' direction='out'/>"
   "    </signal>"
   "  </interface>"
   "</node>";
@@ -613,14 +618,35 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
 {
 	App *app = user_data;
+	DreamTCPupstream *t = app->tcp_upstream;
 	GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER (info);
-	if (GST_IS_BUFFER(buffer) && app->tcp_upstream->id_signal_waiting)
+	if (GST_IS_BUFFER(buffer) && t->id_signal_waiting)
 	{
 		GST_DEBUG_OBJECT (app, "cancel upstream_set_waiting timeout because data flow was restored!");
-		g_source_remove (app->tcp_upstream->id_signal_waiting);
-		app->tcp_upstream->id_signal_waiting = 0;
+		g_source_remove (t->id_signal_waiting);
+		t->id_signal_waiting = 0;
 	}
+	t->id_resume = 0;
 	return GST_PAD_PROBE_REMOVE;
+}
+
+static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
+{
+	App *app = user_data;
+	DreamTCPupstream *t = app->tcp_upstream;
+	GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER (info);
+	GstClockTime now = gst_clock_get_time (app->clock);
+	if (GST_IS_BUFFER(buffer))
+		t->bitrate_sum += gst_buffer_get_size (buffer);
+	GST_LOG_OBJECT (app, "size was=%zu bitrate_sum=%zu now=%" GST_TIME_FORMAT " avg at %" GST_TIME_FORMAT "", gst_buffer_get_size (buffer), t->bitrate_sum, GST_TIME_ARGS(now),GST_TIME_ARGS(t->measure_start+BITRATE_AVG_PERIOD));
+	if (now > t->measure_start+BITRATE_AVG_PERIOD)
+	{
+		guint bitrate = t->bitrate_sum*8/GST_TIME_AS_MSECONDS(BITRATE_AVG_PERIOD);
+		send_signal (app, "tcpBitrate", g_variant_new("(i)", bitrate));
+		t->measure_start = now;
+		t->bitrate_sum = 0;
+	}
+	return GST_PAD_PROBE_OK;
 }
 
 gboolean upstream_set_waiting(App *app)
@@ -631,6 +657,19 @@ gboolean upstream_set_waiting(App *app)
 	t->state = UPSTREAM_STATE_WAITING;
 	send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_WAITING));
 	g_signal_connect (app->tsq, "underrun", G_CALLBACK (queue_underrun), app);
+	GstPad *sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
+	if (t->id_resume)
+	{
+		gst_pad_remove_probe (sinkpad, t->id_resume);
+		t->id_resume = 0;
+	}
+	if (t->id_bitrate_measure)
+	{
+		gst_pad_remove_probe (sinkpad, t->id_bitrate_measure);
+		t->id_bitrate_measure = 0;
+	}
+	send_signal (app, "tcpBitrate", g_variant_new("(i)", 0));
+	gst_object_unref (sinkpad);
 	pause_source_pipeline(app);
 	return FALSE;
 }
@@ -648,6 +687,14 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 			g_signal_connect (queue, "overrun", G_CALLBACK (queue_overrun), app);
 			t->state = UPSTREAM_STATE_TRANSMITTING;
 			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_TRANSMITTING));
+			if (t->id_bitrate_measure == 0)
+			{
+				GstPad *sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
+				t->id_bitrate_measure = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) bitrate_measure_probe, app, NULL);
+				gst_object_unref (sinkpad);
+			}
+			t->measure_start = gst_clock_get_time (app->clock);
+			t->bitrate_sum = 0;
 			if (t->overrun_period == GST_CLOCK_TIME_NONE)
 				t->overrun_period = gst_clock_get_time (app->clock);
 		}
@@ -688,7 +735,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 			{
 				GST_DEBUG_OBJECT (queue, "SET upstream_set_waiting timeout!");
 				GstPad *sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
-				t->resume_id = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) cancel_waiting_probe, app, NULL);
+				t->id_resume = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) cancel_waiting_probe, app, NULL);
 				gst_object_unref (sinkpad);
 				app->tcp_upstream->id_signal_waiting = g_timeout_add_seconds (5, (GSourceFunc) upstream_set_waiting, app);
 			}
@@ -805,7 +852,8 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		g_mutex_lock (&app->rtsp_mutex);
 
 		t->id_signal_waiting = 0;
-		t->resume_id = 0;
+		t->id_bitrate_measure = 0;
+		t->id_resume = 0;
 		t->state = UPSTREAM_STATE_CONNECTING;
 		g_signal_connect (app->tsq, "overrun", G_CALLBACK (queue_overrun), app);
 		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
@@ -969,6 +1017,11 @@ gboolean disable_tcp_upstream(App *app)
 		gst_object_ref (t->tcpsink);
 		GstPad *sinkpad;
 		sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
+		if (t->id_bitrate_measure)
+		{
+			gst_pad_remove_probe (sinkpad, t->id_bitrate_measure);
+			t->id_bitrate_measure = 0;
+		}
 		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);
 		return TRUE;
