@@ -12,6 +12,7 @@ class StreamServerControl(object):
 	PROP_YRES = 'height'
 	PROP_RTSP_STATE = 'rtspState'
 	PROP_UPSTREAM_STATE = 'upstreamState'
+	PROP_AUTO_BITRATE = 'autoBitrate'
 
 	FRAME_RATE_25 = 25
 	FRAME_RATE_30 = 30
@@ -24,7 +25,7 @@ class StreamServerControl(object):
 
 	[INPUT_MODE_LIVE, INPUT_MODE_HDMI_IN, INPUT_MODE_BACKGROUND] = range(3)
 	[RTSP_STATE_DISABLED, RTSP_STATE_IDLE, RTSP_STATE_RUNNING] = range(3)
-	[UPSTREAM_STATE_DISABLED, UPSTREAM_STATE_CONNECTING, UPSTREAM_STATE_RUNNING] = range(3)
+	[UPSTREAM_STATE_DISABLED, UPSTREAM_STATE_CONNECTING, UPSTREAM_STATE_WAITING, UPSTREAM_STATE_TRANSMITTING, UPSTREAM_STATE_OVERLOAD] = range(5)
 
 	def __init__(self):
 		self.reconnect()
@@ -82,6 +83,13 @@ class StreamServerControl(object):
 	def setResolution(self, xres, yres):
 		self._interface.setResolution(xres, yres)
 	resolution = property(getResolution, setResolution)
+
+	def getAutoBitrate(self):
+		return self._getProperty(self.PROP_AUTO_BITRATE)
+
+	def setAutoBitrate(self, enable):
+		self._setProperty(self.PROP_AUTO_BITRATE, enable)
+	autoBitrate = property(getAutoBitrate, setAutoBitrate)
 
 	def _getProperty(self, prop):
 		return self._proxy.Get(self.INTERFACE, prop, dbus_interface=dbus.PROPERTIES_IFACE)

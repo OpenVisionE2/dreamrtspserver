@@ -41,9 +41,11 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 #define BLOCK_SIZE   TS_PER_FRAME*188
 #define TOKEN_LEN    36
 
-#define MAX_OVERRUNS 20
-#define OVERRUN_TIME G_GINT64_CONSTANT(10)*GST_SECOND
+#define MAX_OVERRUNS 5
+#define OVERRUN_TIME G_GINT64_CONSTANT(15)*GST_SECOND
 #define BITRATE_AVG_PERIOD G_GINT64_CONSTANT(5)*GST_SECOND
+
+#define AUTO_BITRATE TRUE
 
 typedef enum {
         INPUT_MODE_LIVE = 0,
@@ -69,6 +71,8 @@ typedef struct {
 	guint id_signal_waiting;
 	gulong id_resume, id_bitrate_measure;
 	gsize bitrate_sum;
+	gint bitrate_avg;
+	gboolean auto_bitrate;
 } DreamTCPupstream;
 
 typedef struct {
@@ -114,6 +118,7 @@ static const gchar introspection_xml[] =
   "    <property type='i' name='width' access='read'/>"
   "    <property type='i' name='height' access='read'/>"
   "    <property type='i' name='inputMode' access='readwrite'/>"
+  "    <property type='b' name='autoBitrate' access='readwrite'/>"
   "    <signal name='sourceReady'/>"
   "    <signal name='encoderError'/>"
   "    <signal name='upstreamStateChanged'>"
@@ -134,6 +139,17 @@ gboolean disable_tcp_upstream(App *app);
 gboolean destroy_pipeline(App *app);
 static void queue_underrun (GstElement *, gpointer);
 static void queue_overrun (GstElement *, gpointer);
+
+static void send_signal (App *app, const gchar *signal_name, GVariant *parameters)
+{
+	if (app->dbus_connection)
+	{
+		GST_DEBUG ("sending signal name=%s parameters=%s", signal_name, parameters?g_variant_print (parameters, TRUE):"[not given]");
+		g_dbus_connection_emit_signal (app->dbus_connection, NULL, object_name, service, signal_name, parameters, NULL);
+	}
+	else
+		GST_DEBUG ("no dbus connection, can't send signal %s", signal_name);
+}
 
 static gboolean gst_set_inputmode(App *app, inputMode input_mode)
 {
@@ -247,7 +263,7 @@ static gboolean gst_get_capsprop(App *app, GstElement *element, const gchar* pro
 	if (!GST_IS_CAPS(caps) || gst_caps_is_empty (caps) )
 		goto out;
 
-	GST_DEBUG("current caps %" GST_PTR_FORMAT, caps);
+	GST_LOG ("current caps %" GST_PTR_FORMAT, caps);
 
 	structure = gst_caps_get_structure (caps, 0);
 	if (!structure)
@@ -269,7 +285,7 @@ static gboolean gst_get_capsprop(App *app, GstElement *element, const gchar* pro
 	else
 		goto out;
 
-	GST_DEBUG("%" GST_PTR_FORMAT"'s %s = %i", element, prop_name, *value);
+	GST_LOG ("%" GST_PTR_FORMAT"'s %s = %i", element, prop_name, *value);
 	ret = TRUE;
 out:
 	if (caps)
@@ -310,6 +326,36 @@ static void apply_source_properties (App *app)
 	}
 }
 
+static gboolean gst_set_bitrate (App *app, GstElement *source, gint32 value)
+{
+	if (!GST_IS_ELEMENT (source) || !value)
+		return FALSE;
+
+	g_object_set (G_OBJECT (source), "bitrate", value, NULL);
+
+	gint32 checkvalue = 0;
+
+	g_object_get (G_OBJECT (source), "bitrate", &checkvalue, NULL);
+
+	if (value != checkvalue)
+		return FALSE;
+
+	get_source_properties(app);
+	return TRUE;
+}
+
+gboolean upstream_resume_transmitting(App *app)
+{
+	DreamTCPupstream *t = app->tcp_upstream;
+	GST_INFO_OBJECT (app, "resuming normal transmission...");
+	t->state = UPSTREAM_STATE_TRANSMITTING;
+	send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_TRANSMITTING));
+	t->overrun_counter = 0;
+	t->overrun_period = GST_CLOCK_TIME_NONE;
+	t->id_signal_waiting = 0;
+	return G_SOURCE_REMOVE;
+}
+
 static GVariant *handle_get_property (GDBusConnection  *connection,
 				      const gchar      *sender,
 				      const gchar      *object_path,
@@ -331,8 +377,10 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	{
 		inputMode input_mode = -1;
 		if (app->asrc)
+		{
 			g_object_get (G_OBJECT (app->asrc), "input_mode", &input_mode, NULL);
-		return g_variant_new_int32 (input_mode);
+			return g_variant_new_int32 (input_mode);
+		}
 	}
 	else if (g_strcmp0 (property_name, "clients") == 0)
 	{
@@ -342,15 +390,19 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	{
 		gint rate = 0;
 		if (app->asrc)
+		{
 			g_object_get (G_OBJECT (app->asrc), "bitrate", &rate, NULL);
-		return g_variant_new_int32 (rate);
+			return g_variant_new_int32 (rate);
+		}
 	}
 	else if (g_strcmp0 (property_name, "videoBitrate") == 0)
 	{
 		gint rate = 0;
 		if (app->vsrc)
+		{
 			g_object_get (G_OBJECT (app->vsrc), "bitrate", &rate, NULL);
-		return g_variant_new_int32 (rate);
+			return g_variant_new_int32 (rate);
+		}
 	}
 	else if (g_strcmp0 (property_name, "width") == 0 || g_strcmp0 (property_name, "height") == 0 || g_strcmp0 (property_name, "framerate") == 0)
 	{
@@ -358,7 +410,11 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 		if (gst_get_capsprop(app, app->vsrc, property_name, &value))
 			return g_variant_new_int32(value);
 		GST_WARNING("can't handle_get_property name=%s", property_name);
-		return g_variant_new_int32(0);
+	}
+	else if (g_strcmp0 (property_name, "autoBitrate") == 0)
+	{
+		if (app->tcp_upstream)
+			return g_variant_new_boolean(app->tcp_upstream->auto_bitrate);
 	}
 	g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] Invalid property '%s'", property_name);
 	return NULL;
@@ -392,19 +448,13 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 	}
 	else if (g_strcmp0 (property_name, "audioBitrate") == 0)
 	{
-		if (app->asrc)
-		{
-			g_object_set (G_OBJECT (app->asrc), "bitrate", g_variant_get_int32 (value), NULL);
+		if (gst_set_bitrate (app, app->asrc, g_variant_get_int32 (value)))
 			return 1;
-		}
 	}
 	else if (g_strcmp0 (property_name, "videoBitrate") == 0)
 	{
-		if (app->vsrc)
-		{
-			g_object_set (G_OBJECT (app->vsrc), "bitrate", g_variant_get_int32 (value), NULL);
+		if (gst_set_bitrate (app, app->vsrc, g_variant_get_int32 (value)))
 			return 1;
-		}
 	}
 	else if (g_strcmp0 (property_name, "framerate") == 0)
 	{
@@ -412,6 +462,17 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 			return 1;
 		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] can't set property '%s' to %d", property_name, g_variant_get_int32 (value));
 		return 0;
+	}
+	else if (g_strcmp0 (property_name, "autoBitrate") == 0)
+	{
+		if (app->tcp_upstream)
+		{
+			gboolean enable = g_variant_get_boolean(value);
+			if (app->tcp_upstream->state == UPSTREAM_STATE_OVERLOAD)
+				upstream_resume_transmitting(app);
+			app->tcp_upstream->auto_bitrate = enable;
+			return 1;
+		}
 	}
 	else
 	{
@@ -474,17 +535,6 @@ static void handle_method_call (GDBusConnection       *connection,
 		g_dbus_method_invocation_return_error (invocation, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "[RTSPserver] Invalid method: '%s'", method_name);
 	} // if it's an unknown method
 } // handle_method_call
-
-static void send_signal (App *app, const gchar *signal_name, GVariant *parameters)
-{
-	if (app->dbus_connection)
-	{
-		GST_DEBUG ("sending signal name=%s parameters=%s", signal_name, parameters?g_variant_print (parameters, TRUE):"[not given]");
-		g_dbus_connection_emit_signal (app->dbus_connection, NULL, object_name, service, signal_name, parameters, NULL);
-	}
-	else
-		GST_DEBUG ("no dbus connection, can't send signal %s", signal_name);
-}
 
 static void on_bus_acquired (GDBusConnection *connection,
 			     const gchar     *name,
@@ -639,9 +689,17 @@ static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInf
 	if (GST_IS_BUFFER(buffer))
 		t->bitrate_sum += gst_buffer_get_size (buffer);
 	GST_LOG_OBJECT (app, "size was=%zu bitrate_sum=%zu now=%" GST_TIME_FORMAT " avg at %" GST_TIME_FORMAT "", gst_buffer_get_size (buffer), t->bitrate_sum, GST_TIME_ARGS(now),GST_TIME_ARGS(t->measure_start+BITRATE_AVG_PERIOD));
+	guint cur_bytes, cur_buf;
+	guint64 cur_time;
+	g_object_get (app->tsq, "current-level-bytes", &cur_bytes, NULL);
+	g_object_get (app->tsq, "current-level-buffers", &cur_buf, NULL);
+	g_object_get (app->tsq, "current-level-time", &cur_time, NULL);
+	GST_LOG_OBJECT (app, "queue properties current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "", cur_bytes, cur_buf, GST_TIME_ARGS(cur_time));
+
 	if (now > t->measure_start+BITRATE_AVG_PERIOD)
 	{
-		guint bitrate = t->bitrate_sum*8/GST_TIME_AS_MSECONDS(BITRATE_AVG_PERIOD);
+		gint bitrate = t->bitrate_sum*8/GST_TIME_AS_MSECONDS(BITRATE_AVG_PERIOD);
+		t->bitrate_avg ? (t->bitrate_avg = (t->bitrate_avg+bitrate)/2) : (t->bitrate_avg = bitrate);
 		send_signal (app, "tcpBitrate", g_variant_new("(i)", bitrate));
 		t->measure_start = now;
 		t->bitrate_sum = 0;
@@ -655,6 +713,7 @@ gboolean upstream_set_waiting(App *app)
 	t->overrun_counter = 0;
 	t->overrun_period = GST_CLOCK_TIME_NONE;
 	t->state = UPSTREAM_STATE_WAITING;
+	g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(1)*GST_SECOND, NULL);
 	send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_WAITING));
 	g_signal_connect (app->tsq, "underrun", G_CALLBACK (queue_underrun), app);
 	GstPad *sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
@@ -671,7 +730,7 @@ gboolean upstream_set_waiting(App *app)
 	send_signal (app, "tcpBitrate", g_variant_new("(i)", 0));
 	gst_object_unref (sinkpad);
 	pause_source_pipeline(app);
-	return FALSE;
+	return G_SOURCE_REMOVE;
 }
 
 static void queue_underrun (GstElement * queue, gpointer user_data)
@@ -683,6 +742,7 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 		DreamTCPupstream *t = app->tcp_upstream;
 		if (unpause_source_pipeline(app))
 		{
+			g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(-1), NULL);
 			g_signal_handlers_disconnect_by_func (queue, G_CALLBACK (queue_underrun), app);
 			g_signal_connect (queue, "overrun", G_CALLBACK (queue_overrun), app);
 			t->state = UPSTREAM_STATE_TRANSMITTING;
@@ -694,7 +754,7 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 				gst_object_unref (sinkpad);
 			}
 			t->measure_start = gst_clock_get_time (app->clock);
-			t->bitrate_sum = 0;
+			t->bitrate_sum = t->bitrate_avg = 0;
 			if (t->overrun_period == GST_CLOCK_TIME_NONE)
 				t->overrun_period = gst_clock_get_time (app->clock);
 		}
@@ -705,6 +765,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 {
 	App *app = user_data;
 	DreamTCPupstream *t = app->tcp_upstream;
+	g_mutex_lock (&app->rtsp_mutex);
 	if (queue == app->tsq)
 	{
 		if (t->state == UPSTREAM_STATE_CONNECTING)
@@ -717,19 +778,35 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 		{
 			t->overrun_counter++;
 
-			if (app->tcp_upstream->id_signal_waiting)
+			if (t->id_signal_waiting)
 			{
 				g_signal_handlers_disconnect_by_func(app->tsq, G_CALLBACK (queue_overrun), app);
 				GST_DEBUG_OBJECT (queue, "disconnect overrun callback and wait for timeout or for buffer flow!");
+				g_mutex_unlock (&app->rtsp_mutex);
 				return;
 			}
 
 			GstClockTime now = gst_clock_get_time (app->clock);
-			GST_DEBUG_OBJECT (queue, "queue overrun during transmit... %i (max %i) overruns within %" GST_TIME_FORMAT "", t->overrun_counter, MAX_OVERRUNS, GST_TIME_ARGS (now-app->tcp_upstream->overrun_period));
+			GST_DEBUG_OBJECT (queue, "queue overrun during transmit... %i (max %i) overruns within %" GST_TIME_FORMAT "", t->overrun_counter, MAX_OVERRUNS, GST_TIME_ARGS (now-t->overrun_period));
 			if (t->overrun_counter >= MAX_OVERRUNS)
 			{
-				app->tcp_upstream->state = UPSTREAM_STATE_OVERLOAD;
+				t->state = UPSTREAM_STATE_OVERLOAD;
 				send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_OVERLOAD));
+				if (t->auto_bitrate)
+				{
+					get_source_properties (app);
+					SourceProperties *p = &app->source_properties;
+					GST_DEBUG_OBJECT (queue, "auto overload handling: reduce bitrate from audioBitrate=%i videoBitrate=%i to fit network bandwidth=%i kbit/s", p->audioBitrate, p->videoBitrate, t->bitrate_avg);
+					gint newAudioBitrate, newVideoBitrate;
+					if (p->audioBitrate > 96)
+						p->audioBitrate = p->audioBitrate*0.8;
+					p->videoBitrate = (t->bitrate_avg-newAudioBitrate)*0.8;
+					GST_INFO_OBJECT (queue, "auto overload handling: newAudioBitrate=%i newVideoBitrate=%i newTotalBitrate~%i kbit/s", p->audioBitrate, p->videoBitrate, p->audioBitrate+p->videoBitrate);
+					apply_source_properties(app);
+					t->id_signal_waiting = g_timeout_add_seconds (5, (GSourceFunc) upstream_resume_transmitting, app);
+				}
+				else
+					GST_INFO_OBJECT (queue, "auto overload handling diabled, go into UPSTREAM_STATE_OVERLOAD");
 			}
 			else
 			{
@@ -737,7 +814,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 				GstPad *sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
 				t->id_resume = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) cancel_waiting_probe, app, NULL);
 				gst_object_unref (sinkpad);
-				app->tcp_upstream->id_signal_waiting = g_timeout_add_seconds (5, (GSourceFunc) upstream_set_waiting, app);
+				t->id_signal_waiting = g_timeout_add_seconds (5, (GSourceFunc) upstream_set_waiting, app);
 			}
 
 			if (now > t->overrun_period+OVERRUN_TIME)
@@ -746,7 +823,13 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 				t->overrun_period = now;
 			}
 		}
+		else if (t->state == UPSTREAM_STATE_OVERLOAD)
+		{
+			t->overrun_counter++;
+			GST_LOG_OBJECT (queue, "in UPSTREAM_STATE_OVERLOAD overrun_counter=%i auto_bitrate=%i", t->overrun_counter, t->auto_bitrate);
+		}
 	}
+	g_mutex_unlock (&app->rtsp_mutex);
 }
 
 gboolean create_source_pipeline(App *app)
@@ -774,7 +857,7 @@ gboolean create_source_pipeline(App *app)
 		g_error ("Failed to create source pipeline element(s):%s%s%s%s", app->asrc?"":" dreamaudiosource", app->vsrc?"":" dreamvideosource", app->aparse?"":" aacparse", app->vparse?"":" h264parse");
 	}
 
-	g_object_set (G_OBJECT (app->tsq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+	g_object_set (G_OBJECT (app->tsq), "leaky", 0, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 
 	gst_bin_add_many (GST_BIN (app->pipeline), app->asrc, app->vsrc, app->aparse, app->vparse, NULL);
 	gst_bin_add_many (GST_BIN (app->pipeline), app->tsmux, app->tsq, NULL);
@@ -1094,6 +1177,7 @@ int main (int argc, char *argv[])
 
 	app.tcp_upstream = malloc(sizeof(DreamTCPupstream));
 	app.tcp_upstream->state = UPSTREAM_STATE_DISABLED;
+	app.tcp_upstream->auto_bitrate = AUTO_BITRATE;
 
 	app.loop = g_main_loop_new (NULL, FALSE);
 	g_unix_signal_add(SIGINT, quit_signal, app.loop);
