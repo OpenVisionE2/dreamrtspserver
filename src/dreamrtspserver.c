@@ -646,6 +646,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 	g_mutex_lock (&app->rtsp_mutex);
 	if (queue == app->tsq)
 	{
+		GstClockTime now = gst_clock_get_time (app->clock);
 		if (t->state == UPSTREAM_STATE_CONNECTING)
 		{
 			GST_DEBUG_OBJECT (queue, "initial queue overrun after connect");
@@ -655,7 +656,6 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 		else if (t->state == UPSTREAM_STATE_TRANSMITTING)
 		{
 			t->overrun_counter++;
-
 			if (t->id_signal_waiting)
 			{
 				g_signal_handlers_disconnect_by_func(app->tsq, G_CALLBACK (queue_overrun), app);
@@ -663,28 +663,25 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 				g_mutex_unlock (&app->rtsp_mutex);
 				return;
 			}
-
-			GstClockTime now = gst_clock_get_time (app->clock);
 			GST_DEBUG_OBJECT (queue, "queue overrun during transmit... %i (max %i) overruns within %" GST_TIME_FORMAT "", t->overrun_counter, MAX_OVERRUNS, GST_TIME_ARGS (now-t->overrun_period));
 			if (t->overrun_counter >= MAX_OVERRUNS)
 			{
-				t->state = UPSTREAM_STATE_OVERLOAD;
-				send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_OVERLOAD));
 				if (t->auto_bitrate)
 				{
-					get_source_properties (app);
-					SourceProperties *p = &app->source_properties;
-					GST_DEBUG_OBJECT (queue, "auto overload handling: reduce bitrate from audioBitrate=%i videoBitrate=%i to fit network bandwidth=%i kbit/s", p->audioBitrate, p->videoBitrate, t->bitrate_avg);
-					gint newAudioBitrate, newVideoBitrate;
-					if (p->audioBitrate > 96)
-						p->audioBitrate = p->audioBitrate*0.8;
-					p->videoBitrate = (t->bitrate_avg-newAudioBitrate)*0.8;
-					GST_INFO_OBJECT (queue, "auto overload handling: newAudioBitrate=%i newVideoBitrate=%i newTotalBitrate~%i kbit/s", p->audioBitrate, p->videoBitrate, p->audioBitrate+p->videoBitrate);
-					apply_source_properties(app);
-					t->id_signal_waiting = g_timeout_add_seconds (5, (GSourceFunc) upstream_resume_transmitting, app);
+					t->state = UPSTREAM_STATE_ADJUSTING;
+					send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_OVERLOAD));
+					auto_adjust_bitrate (app);
+					t->overrun_period = now;
 				}
 				else
-					GST_INFO_OBJECT (queue, "auto overload handling diabled, go into UPSTREAM_STATE_OVERLOAD");
+				{
+					t->state = UPSTREAM_STATE_OVERLOAD;
+					send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_OVERLOAD));
+					GST_DEBUG_OBJECT (queue, "auto overload handling diabled, go into UPSTREAM_STATE_OVERLOAD");
+					if (t->id_signal_waiting)
+						g_source_remove (t->id_signal_waiting);
+					t->id_signal_waiting = g_timeout_add_seconds (RESUME_DELAY, (GSourceFunc) upstream_resume_transmitting, app);
+				}
 			}
 			else
 			{
@@ -692,9 +689,10 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 				GstPad *sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
 				t->id_resume = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) cancel_waiting_probe, app, NULL);
 				gst_object_unref (sinkpad);
+				if (t->id_signal_waiting)
+					g_source_remove (t->id_signal_waiting);
 				t->id_signal_waiting = g_timeout_add_seconds (5, (GSourceFunc) upstream_set_waiting, app);
 			}
-
 			if (now > t->overrun_period+OVERRUN_TIME)
 			{
 				t->overrun_counter = 0;
@@ -704,10 +702,51 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 		else if (t->state == UPSTREAM_STATE_OVERLOAD)
 		{
 			t->overrun_counter++;
-			GST_LOG_OBJECT (queue, "in UPSTREAM_STATE_OVERLOAD overrun_counter=%i auto_bitrate=%i", t->overrun_counter, t->auto_bitrate);
+			if (t->id_signal_waiting)
+				g_source_remove (t->id_signal_waiting);
+			t->id_signal_waiting = g_timeout_add_seconds (5, (GSourceFunc) upstream_resume_transmitting, app);
+			GST_DEBUG_OBJECT (queue, "still in UPSTREAM_STATE_OVERLOAD overrun_counter=%i, reset resume transmit timeout!", t->overrun_counter);
+		}
+		else if (t->state == UPSTREAM_STATE_ADJUSTING)
+		{
+			if (now < t->overrun_period+BITRATE_AVG_PERIOD)
+			{
+				GST_DEBUG_OBJECT (queue, "still in grace period, waiting for bitrate adjustment to take effect. %"G_GUINT64_FORMAT" ms remaining", GST_TIME_AS_MSECONDS(t->overrun_period+BITRATE_AVG_PERIOD-now));
+			}
+			else
+			{
+				t->overrun_counter++;
+				if (t->overrun_counter < MAX_OVERRUNS)
+					GST_DEBUG_OBJECT (queue, "still waiting for bitrate adjustment to take effect. overrun_counter=%i", t->overrun_counter);
+				else
+				{
+					GST_DEBUG_OBJECT (queue, "max overruns %i hit again while auto adjusting. -> RE-ADJUST!", t->overrun_counter);
+					t->overrun_counter = 0;
+					auto_adjust_bitrate (app);
+					t->overrun_period = now;
+				}
+			}
 		}
 	}
 	g_mutex_unlock (&app->rtsp_mutex);
+}
+
+gboolean auto_adjust_bitrate(App *app)
+{
+	DreamTCPupstream *t = app->tcp_upstream;
+	get_source_properties (app);
+	SourceProperties *p = &app->source_properties;
+	GST_DEBUG_OBJECT (app, "auto overload handling: reduce bitrate from audioBitrate=%i videoBitrate=%i to fit network bandwidth=%i kbit/s", p->audioBitrate, p->videoBitrate, t->bitrate_avg);
+	gint newAudioBitrate, newVideoBitrate;
+	if (p->audioBitrate > 96)
+		p->audioBitrate = p->audioBitrate*0.8;
+	p->videoBitrate = (t->bitrate_avg-newAudioBitrate)*0.8;
+	GST_INFO_OBJECT (app, "auto overload handling: newAudioBitrate=%i newVideoBitrate=%i newTotalBitrate~%i kbit/s", p->audioBitrate, p->videoBitrate, p->audioBitrate+p->videoBitrate);
+	apply_source_properties(app);
+	if (t->id_signal_waiting)
+		g_source_remove (t->id_signal_waiting);
+	t->id_signal_waiting = g_timeout_add_seconds (RESUME_DELAY, (GSourceFunc) upstream_resume_transmitting, app);
+	t->overrun_counter = 0;
 }
 
 gboolean create_source_pipeline(App *app)

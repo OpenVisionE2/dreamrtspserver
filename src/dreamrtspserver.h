@@ -48,6 +48,8 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 #define OVERRUN_TIME G_GINT64_CONSTANT(15)*GST_SECOND
 #define BITRATE_AVG_PERIOD G_GINT64_CONSTANT(5)*GST_SECOND
 
+#define RESUME_DELAY 20
+
 #define AUTO_BITRATE TRUE
 
 G_BEGIN_DECLS
@@ -63,7 +65,8 @@ typedef enum {
         UPSTREAM_STATE_CONNECTING = 1,
         UPSTREAM_STATE_WAITING = 2,
         UPSTREAM_STATE_TRANSMITTING = 3,
-        UPSTREAM_STATE_OVERLOAD = 4
+        UPSTREAM_STATE_OVERLOAD = 4,
+        UPSTREAM_STATE_ADJUSTING = 5
 } upstreamState;
 
 typedef struct {
@@ -159,6 +162,7 @@ static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo
 static GstPadProbeReturn pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data);
 static void queue_underrun (GstElement *, gpointer);
 static void queue_overrun (GstElement *, gpointer);
+gboolean auto_adjust_bitrate(App *app);
 
 gboolean create_source_pipeline(App *app);
 gboolean halt_source_pipeline(App *app);
