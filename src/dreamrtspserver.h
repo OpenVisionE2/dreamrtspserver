@@ -25,9 +25,13 @@
 #include <glib-unix.h>
 #include <gst/gst.h>
 #include <gst/app/app.h>
+#include <gst/rtsp-server/rtsp-server.h>
 
 GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 #define GST_CAT_DEFAULT dreamrtspserver_debug
+
+#define DEFAULT_RTSP_PORT 554
+#define DEFAULT_RTSP_PATH "/stream"
 
 #define TOKEN_LEN 36
 
@@ -69,8 +73,14 @@ typedef enum {
         UPSTREAM_STATE_ADJUSTING = 5
 } upstreamState;
 
+typedef enum {
+        RTSP_STATE_DISABLED = 0,
+        RTSP_STATE_IDLE = 1,
+        RTSP_STATE_RUNNING = 2
+} rtspState;
+
 typedef struct {
-	GstElement *tcpsink;
+	GstElement *tstcpq, *tcpsink;
 	gulong inject_id;
 	char token[TOKEN_LEN+1];
 	upstreamState state;
@@ -84,6 +94,24 @@ typedef struct {
 } DreamTCPupstream;
 
 typedef struct {
+	GstRTSPServer *server;
+	GstRTSPMountPoints *mounts;
+	GstRTSPMediaFactory *es_factory, *ts_factory;
+	GstRTSPMedia *es_media, *ts_media;
+	GstElement *artspq, *vrtspq, *tsrtspq;
+	GstElement *es_aappsrc, *es_vappsrc;
+	GstElement *ts_appsrc;
+	GstElement *aappsink, *vappsink, *tsappsink;
+	GstClockTime rtsp_start_pts, rtsp_start_dts;
+	gchar *rtsp_user, *rtsp_pass;
+	GList *clients_list;
+	gchar *rtsp_port;
+	gchar *rtsp_path;
+	guint source_id;
+	rtspState state;
+} DreamRTSPserver;
+
+typedef struct {
 	gint audioBitrate, videoBitrate;
 	guint framerate, width, height;
 } SourceProperties;
@@ -93,8 +121,11 @@ typedef struct {
 	GMainLoop *loop;
 	GstElement *pipeline;
 	GstElement *asrc, *vsrc, *aparse, *vparse;
-	GstElement *tsmux, *tsq;
+	GstElement *tsmux, *tstee;
+	GstElement *aq, *vq;
+	GstElement *atee, *vtee;
 	DreamTCPupstream *tcp_upstream;
+	DreamRTSPserver *rtsp_server;
 	GMutex rtsp_mutex;
 	GstClock *clock;
 	SourceProperties source_properties;
@@ -114,11 +145,20 @@ static const gchar introspection_xml[] =
   "      <arg type='s' name='token' direction='in'/>"
   "      <arg type='b' name='result' direction='out'/>"
   "    </method>"
+  "    <method name='enableRTSP'>"
+  "      <arg type='b' name='state' direction='in'/>"
+  "      <arg type='s' name='path' direction='in'/>"
+  "      <arg type='u' name='port' direction='in'/>"
+  "      <arg type='s' name='user' direction='in'/>"
+  "      <arg type='s' name='pass' direction='in'/>"
+  "      <arg type='b' name='result' direction='out'/>"
+  "    </method>"
   "    <method name='setResolution'>"
   "      <arg type='i' name='width' direction='in'/>"
   "      <arg type='i' name='height' direction='in'/>"
   "    </method>"
   "    <property type='i' name='upstreamState' access='read'/>"
+  "    <property type='i' name='rtspState' access='read'/>"
   "    <property type='i' name='audioBitrate' access='readwrite'/>"
   "    <property type='i' name='videoBitrate' access='readwrite'/>"
   "    <property type='i' name='framerate' access='readwrite'/>"
@@ -168,10 +208,16 @@ gboolean create_source_pipeline(App *app);
 gboolean halt_source_pipeline(App *app);
 gboolean pause_source_pipeline(App *app);
 gboolean unpause_source_pipeline(App *app);
-gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstream_port, const gchar *token);
-gboolean disable_tcp_upstream(App *app);
 gboolean destroy_pipeline(App *app);
 gboolean quit_signal(gpointer loop);
+
+gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstream_port, const gchar *token);
+gboolean disable_tcp_upstream(App *app);
+
+DreamRTSPserver *create_rtsp_server(App *app);
+gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gchar *user, const gchar *pass);
+gboolean disable_rtsp_server(App *app);
+gboolean start_rtsp_pipeline(App *app);
 
 G_END_DECLS
 
