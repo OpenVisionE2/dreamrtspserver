@@ -395,11 +395,14 @@ static void handle_method_call (GDBusConnection       *connection,
 
 			if (state == TRUE && app->rtsp_server->state >= RTSP_STATE_DISABLED)
 				result = enable_rtsp_server(app, path, port, user, pass);
-			else if (state == FALSE && app->rtsp_server->state >= RTSP_STATE_RUNNING)
+			else if (state == FALSE && app->rtsp_server->state >= RTSP_STATE_IDLE)
                         {
 				result = disable_rtsp_server(app);
-				destroy_pipeline(app);
-				create_source_pipeline(app);
+				if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
+				{
+					destroy_pipeline(app);
+					create_source_pipeline(app);
+				}
                         }
 		}
 		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
@@ -421,8 +424,11 @@ static void handle_method_call (GDBusConnection       *connection,
 			else if (state == FALSE && app->tcp_upstream->state >= UPSTREAM_STATE_CONNECTING)
 			{
 				result = disable_tcp_upstream(app);
-				destroy_pipeline(app);
-				create_source_pipeline(app);
+				if (app->rtsp_server->state == RTSP_STATE_DISABLED)
+				{
+					destroy_pipeline(app);
+					create_source_pipeline(app);
+				}
 			}
 		}
 		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
@@ -596,7 +602,11 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	{
 		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
 			halt_source_pipeline(app);
-		r->state = RTSP_STATE_IDLE;
+		if (r->state == RTSP_STATE_RUNNING)
+		{
+			GST_LOG ("set RTSP_STATE_IDLE");
+			r->state = RTSP_STATE_IDLE;
+		}
 	}
 	g_mutex_unlock (&app->rtsp_mutex);
 }
@@ -646,6 +656,7 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 	}
 	r->rtsp_start_pts = r->rtsp_start_dts = GST_CLOCK_TIME_NONE;
 	r->state = RTSP_STATE_RUNNING;
+	GST_LOG ("set RTSP_STATE_RUNNING");
 	start_rtsp_pipeline(app);
 	g_mutex_unlock (&app->rtsp_mutex);
 }
@@ -1362,6 +1373,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_path, g_object_ref(r->es_factory));
 		gst_rtsp_mount_points_add_factory (r->mounts, "/ts", g_object_ref(r->ts_factory));
 		r->state = RTSP_STATE_IDLE;
+		GST_LOG ("set RTSP_STATE_IDLE");
 		r->source_id = gst_rtsp_server_attach (r->server, NULL);
 		g_print ("dreambox encoder stream ready at rtsp://%s127.0.0.1:%s%s\n", credentials, app->rtsp_server->rtsp_port, app->rtsp_server->rtsp_path);
 		return TRUE;
@@ -1417,10 +1429,16 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 		GstPad *srcpad, *muxpad;
 		srcpad = gst_element_get_static_pad (element, "src");
 		muxpad = gst_pad_get_peer (srcpad);
-		gst_pad_unlink (srcpad, muxpad);
-		gst_element_release_request_pad (app->tsmux, muxpad);
+		if (GST_IS_PAD (muxpad))
+		{
+			GST_LOG_OBJECT (pad, "srcpad % " GST_PTR_FORMAT " muxpad % "GST_PTR_FORMAT" tsmux % "GST_PTR_FORMAT, srcpad, muxpad, app->tsmux);
+			gst_pad_unlink (srcpad, muxpad);
+			gst_element_release_request_pad (app->tsmux, muxpad);
+			gst_object_unref (muxpad);
+		}
+		else
+			GST_LOG_OBJECT (pad, "srcpad % " GST_PTR_FORMAT "'s peer was already unreffed");
 		gst_object_unref (srcpad);
-		gst_object_unref (muxpad);
 
 		gst_element_set_state (element, GST_STATE_READY);
 
@@ -1428,7 +1446,7 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 		gst_element_get_state (GST_ELEMENT(app->aq), &astate, NULL, 1*GST_USECOND);
 		gst_element_get_state (GST_ELEMENT(app->vq), &vstate, NULL, 1*GST_USECOND);
 
-		if (astate == GST_STATE_READY && vstate == GST_STATE_READY)
+		if (astate == GST_STATE_READY && vstate == GST_STATE_READY && GST_IS_ELEMENT(app->tsmux))
 		{
 			gst_object_ref (app->tsmux);
 			GstPad *sinkpad;
@@ -1636,7 +1654,7 @@ gboolean disable_rtsp_server(App *app)
 		gst_object_unref (sinkpad);
 
 		g_mutex_unlock (&app->rtsp_mutex);
-		GST_INFO("rtsp_server disabled!");
+		GST_INFO("rtsp_server disabled! set RTSP_STATE_DISABLED");
 		return TRUE;
 	}
 	return FALSE;
