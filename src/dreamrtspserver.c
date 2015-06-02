@@ -297,7 +297,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	else if (g_strcmp0 (property_name, "path") == 0)
 	{
 		if (app->rtsp_server)
-		        return g_variant_new_string (app->rtsp_server->rtsp_path);
+		        return g_variant_new_string (app->rtsp_server->rtsp_ts_path);
 	}
 	g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] Invalid property '%s'", property_name);
 	return NULL;
@@ -1365,17 +1365,23 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		gst_rtsp_server_set_service (r->server, r->rtsp_port);
 
 		if (strlen(path))
-			r->rtsp_path = g_strdup_printf ("%s%s", path[0]=='/' ? "" : "/", path);
+		{
+			r->rtsp_ts_path = g_strdup_printf ("%s%s", path[0]=='/' ? "" : "/", path);
+			r->rtsp_es_path = g_strdup_printf ("%s%s%s", path[0]=='/' ? "" : "/", path, RTSP_ES_PATH_SUFX);
+		}
 		else
-			r->rtsp_path = g_strdup(DEFAULT_RTSP_PATH);
+		{
+			r->rtsp_ts_path = g_strdup(DEFAULT_RTSP_PATH);
+			r->rtsp_es_path = g_strdup_printf ("%s%s", DEFAULT_RTSP_PATH, RTSP_ES_PATH_SUFX);
+		}
 
 		r->mounts = gst_rtsp_server_get_mount_points (r->server);
-		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_path, g_object_ref(r->es_factory));
-		gst_rtsp_mount_points_add_factory (r->mounts, "/ts", g_object_ref(r->ts_factory));
+		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_ts_path, g_object_ref(r->ts_factory));
+		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_es_path, g_object_ref(r->es_factory));
 		r->state = RTSP_STATE_IDLE;
 		GST_LOG ("set RTSP_STATE_IDLE");
 		r->source_id = gst_rtsp_server_attach (r->server, NULL);
-		g_print ("dreambox encoder stream ready at rtsp://%s127.0.0.1:%s%s\n", credentials, app->rtsp_server->rtsp_port, app->rtsp_server->rtsp_path);
+		g_print ("dreambox encoder stream ready at rtsp://%s127.0.0.1:%s%s\n", credentials, app->rtsp_server->rtsp_port, app->rtsp_server->rtsp_ts_path);
 		return TRUE;
 	}
 	else
@@ -1620,7 +1626,8 @@ gboolean disable_rtsp_server(App *app)
 		if (app->rtsp_server->es_media)
 			gst_rtsp_server_client_filter(app->rtsp_server->server, (GstRTSPServerClientFilterFunc) remove_client_filter_func, app);
 		g_mutex_lock (&app->rtsp_mutex);
-		gst_rtsp_mount_points_remove_factory (app->rtsp_server->mounts, app->rtsp_server->rtsp_path);
+		gst_rtsp_mount_points_remove_factory (app->rtsp_server->mounts, app->rtsp_server->rtsp_es_path);
+		gst_rtsp_mount_points_remove_factory (app->rtsp_server->mounts, app->rtsp_server->rtsp_ts_path);
 		GSource *source = g_main_context_find_source_by_id (g_main_context_default (), r->source_id);
 		g_source_destroy(source);
 // 		g_source_unref(source);
@@ -1632,7 +1639,8 @@ gboolean disable_rtsp_server(App *app)
 		g_free(r->rtsp_user);
 		g_free(r->rtsp_pass);
 		g_free(r->rtsp_port);
-		g_free(r->rtsp_path);
+		g_free(r->rtsp_ts_path);
+		g_free(r->rtsp_es_path);
 		r->state = RTSP_STATE_DISABLED;
 
 		gst_object_ref (r->tsrtspq);

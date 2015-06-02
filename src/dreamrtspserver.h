@@ -32,6 +32,7 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 
 #define DEFAULT_RTSP_PORT 554
 #define DEFAULT_RTSP_PATH "/stream"
+#define RTSP_ES_PATH_SUFX "-es"
 
 #define TOKEN_LEN 36
 
@@ -112,7 +113,7 @@ typedef struct {
 	gchar *rtsp_user, *rtsp_pass;
 	GList *clients_list;
 	gchar *rtsp_port;
-	gchar *rtsp_path;
+	gchar *rtsp_ts_path, *rtsp_es_path;
 	guint source_id;
 	rtspState state;
 } DreamRTSPserver;
