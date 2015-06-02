@@ -27,8 +27,20 @@ PKG_CHECK_MODULES(GSTRTSPSERVER, [gstreamer-rtsp-server-1.0], [])
 PKG_CHECK_MODULES(GSTAPP, [gstreamer-app-1.0 ], [])
 PKG_CHECK_MODULES(GIO, [gio-2.0 ], [])
 
+AC_ARG_WITH(upstream,
+	AS_HELP_STRING([--with-upstream],[enable mediator upstream feature @<:@default=disable@:>@]),
+	[with_upstream="$withval"],[with_upstream="no"])
+if test "$with_upstream" = "yes"; then
+	AC_DEFINE([HAVE_UPSTREAM],[1],[defined to 1 if upstream is available])
+fi
+AM_CONDITIONAL(HAVE_UPSTREAM, test "$with_upstream" = "yes")
+
 AC_CONFIG_FILES([
 Makefile
 src/Makefile
 ])
 AC_OUTPUT
+
+AS_IF([test "$with_upstream" = "yes"],[
+echo "  Enabled mediator upstream feature"
+])

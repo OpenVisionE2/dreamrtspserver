@@ -18,7 +18,6 @@
 
 #include "dreamrtspserver.h"
 
-
 static void send_signal (App *app, const gchar *signal_name, GVariant *parameters)
 {
 	if (app->dbus_connection)

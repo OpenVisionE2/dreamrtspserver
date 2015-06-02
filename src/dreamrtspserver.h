@@ -56,6 +56,12 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 
 #define AUTO_BITRATE TRUE
 
+#if HAVE_UPSTREAM
+	#pragma message("building with mediator upstream feature")
+#else
+	#pragma message("building without mediator upstream feature")
+#endif
+
 G_BEGIN_DECLS
 
 typedef enum {
@@ -138,6 +144,7 @@ static GDBusNodeInfo *introspection_data = NULL;
 static const gchar introspection_xml[] =
   "<node>"
   "  <interface name='com.dreambox.RTSPserver'>"
+#if HAVE_UPSTREAM
   "    <method name='enableUpstream'>"
   "      <arg type='b' name='state' direction='in'/>"
   "      <arg type='s' name='host' direction='in'/>"
@@ -145,6 +152,14 @@ static const gchar introspection_xml[] =
   "      <arg type='s' name='token' direction='in'/>"
   "      <arg type='b' name='result' direction='out'/>"
   "    </method>"
+  "    <signal name='upstreamStateChanged'>"
+  "      <arg type='i' name='state' direction='out'/>"
+  "    </signal>"
+  "    <signal name='tcpBitrate'>"
+  "      <arg type='i' name='kbps' direction='out'/>"
+  "    </signal>"
+  "    <property type='i' name='upstreamState' access='read'/>"
+#endif
   "    <method name='enableRTSP'>"
   "      <arg type='b' name='state' direction='in'/>"
   "      <arg type='s' name='path' direction='in'/>"
@@ -157,7 +172,6 @@ static const gchar introspection_xml[] =
   "      <arg type='i' name='width' direction='in'/>"
   "      <arg type='i' name='height' direction='in'/>"
   "    </method>"
-  "    <property type='i' name='upstreamState' access='read'/>"
   "    <property type='i' name='rtspState' access='read'/>"
   "    <property type='i' name='audioBitrate' access='readwrite'/>"
   "    <property type='i' name='videoBitrate' access='readwrite'/>"
@@ -168,12 +182,6 @@ static const gchar introspection_xml[] =
   "    <property type='b' name='autoBitrate' access='readwrite'/>"
   "    <signal name='sourceReady'/>"
   "    <signal name='encoderError'/>"
-  "    <signal name='upstreamStateChanged'>"
-  "      <arg type='i' name='state' direction='out'/>"
-  "    </signal>"
-  "    <signal name='tcpBitrate'>"
-  "      <arg type='i' name='kbps' direction='out'/>"
-  "    </signal>"
   "  </interface>"
   "</node>";
 
