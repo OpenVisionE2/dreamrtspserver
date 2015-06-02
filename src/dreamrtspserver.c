@@ -1104,7 +1104,6 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		t->id_bitrate_measure = 0;
 		t->id_resume = 0;
 		t->state = UPSTREAM_STATE_CONNECTING;
-		g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
 		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
 
 		t->tstcpq   = gst_element_factory_make ("queue", "tstcpqueue");
@@ -1112,6 +1111,8 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 
 		if (!(t->tstcpq && t->tcpsink ))
 		g_error ("Failed to create tcp upstream element(s):%s%s", t->tstcpq?"":"  ts queue", t->tcpsink?"":"  tcpclientsink" );
+
+		g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
 
 		g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 		g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
@@ -1715,14 +1716,16 @@ gboolean disable_tcp_upstream(App *app)
 	DreamTCPupstream *t = app->tcp_upstream;
 	if (t->state >= UPSTREAM_STATE_CONNECTING)
 	{
-		gst_object_ref (t->tstcpq);
 		GstPad *sinkpad;
-		sinkpad = gst_element_get_static_pad (t->tstcpq, "sink");
 		if (t->id_bitrate_measure)
 		{
+			sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
 			gst_pad_remove_probe (sinkpad, t->id_bitrate_measure);
 			t->id_bitrate_measure = 0;
+			gst_object_unref (sinkpad);
 		}
+		gst_object_ref (t->tstcpq);
+		sinkpad = gst_element_get_static_pad (t->tstcpq, "sink");
 		gulong probe_id = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, upstream_pad_probe_unlink_cb, app, NULL);
 		GST_DEBUG("added upstream_pad_probe_unlink_cb with probe_id = %lu on %" GST_PTR_FORMAT"", probe_id, sinkpad);
 		gst_object_unref (sinkpad);
