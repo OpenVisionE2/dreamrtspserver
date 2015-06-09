@@ -63,6 +63,23 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 	#pragma message("building without mediator upstream feature")
 #endif
 
+#define DREAMRTSPSERVER_LOCK(obj) G_STMT_START {   \
+    GST_LOG_OBJECT (obj,                           \
+                    "locking from thread %p",      \
+                    g_thread_self ());             \
+    g_mutex_lock (&obj->rtsp_mutex);               \
+    GST_LOG_OBJECT (obj,                           \
+                    "locked from thread %p",       \
+                    g_thread_self ());             \
+} G_STMT_END
+
+#define DREAMRTSPSERVER_UNLOCK(obj) G_STMT_START { \
+    GST_LOG_OBJECT (obj,                           \
+                    "unlocking from thread %p",    \
+                    g_thread_self ());             \
+    g_mutex_unlock (&obj->rtsp_mutex);             \
+} G_STMT_END
+
 G_BEGIN_DECLS
 
 typedef enum {

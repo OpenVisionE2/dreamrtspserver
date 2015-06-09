@@ -489,7 +489,8 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 {
 	App *app = user_data;
 
-	g_mutex_lock (&app->rtsp_mutex);
+// 	DREAMRTSPSERVER_LOCK (app);
+	GST_LOG_OBJECT (app, "message %" GST_PTR_FORMAT "", message);
 	switch (GST_MESSAGE_TYPE (message)) {
 		case GST_MESSAGE_STATE_CHANGED:
 		{
@@ -525,7 +526,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 				{
 					GST_INFO ("element %s: %s", name, err->message);
 					send_signal (app, "encoderError", NULL);
-					g_mutex_unlock (&app->rtsp_mutex);
+// 					DREAMRTSPSERVER_UNLOCK (app);
 					disable_tcp_upstream(app);
 					destroy_pipeline(app);
 				}
@@ -533,7 +534,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 				{
 					GST_INFO ("element %s: %s -> this means PEER DISCONNECTED", name, err->message);
 					GST_LOG ("Additional ERROR debug info: %s", debug);
-					g_mutex_unlock (&app->rtsp_mutex);
+// 					DREAMRTSPSERVER_UNLOCK (app);
 					disable_tcp_upstream(app);
 					if (&app->rtsp_server->state == RTSP_STATE_DISABLED)
 					{
@@ -570,13 +571,13 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 		}
 		case GST_MESSAGE_EOS:
 			g_print ("Got EOS\n");
-			g_mutex_unlock (&app->rtsp_mutex);
+// 			DREAMRTSPSERVER_UNLOCK (app);
 			g_main_loop_quit (app->loop);
 			return FALSE;
 		default:
 			break;
 	}
-	g_mutex_unlock (&app->rtsp_mutex);
+// 	DREAMRTSPSERVER_UNLOCK (app);
 	return TRUE;
 }
 
@@ -586,7 +587,7 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	DreamRTSPserver *r = app->rtsp_server;
 	GST_INFO("no more clients -> media unprepared!");
 
-	g_mutex_lock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_LOCK (app);
 	if (media == r->es_media)
 	{
 		r->es_media = NULL;
@@ -607,7 +608,7 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 			r->state = RTSP_STATE_IDLE;
 		}
 	}
-	g_mutex_unlock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_UNLOCK (app);
 }
 
 static void client_closed (GstRTSPClient * client, gpointer user_data)
@@ -630,7 +631,7 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 {
 	App *app = user_data;
 	DreamRTSPserver *r = app->rtsp_server;
-	g_mutex_lock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_LOCK (app);
 
 	if (factory == r->es_factory)
 	{
@@ -657,7 +658,7 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 	r->state = RTSP_STATE_RUNNING;
 	GST_LOG ("set RTSP_STATE_RUNNING");
 	start_rtsp_pipeline(app);
-	g_mutex_unlock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_UNLOCK (app);
 }
 
 static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
@@ -760,7 +761,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 {
 	App *app = user_data;
 	DreamTCPupstream *t = app->tcp_upstream;
-	g_mutex_lock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_LOCK (app);
 	if (queue == t->tstcpq && app->rtsp_server->state != RTSP_STATE_IDLE)
 	{
 		GstClockTime now = gst_clock_get_time (app->clock);
@@ -778,7 +779,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 			{
 				g_signal_handlers_disconnect_by_func(t->tstcpq, G_CALLBACK (queue_overrun), app);
 				GST_DEBUG_OBJECT (queue, "disconnect overrun callback and wait for timeout or for buffer flow!");
-				g_mutex_unlock (&app->rtsp_mutex);
+				DREAMRTSPSERVER_UNLOCK (app);
 				return;
 			}
 			GST_DEBUG_OBJECT (queue, "queue overrun during transmit... %i (max %i) overruns within %" GST_TIME_FORMAT "", t->overrun_counter, MAX_OVERRUNS, GST_TIME_ARGS (now-t->overrun_period));
@@ -847,7 +848,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 			}
 		}
 	}
-	g_mutex_unlock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_UNLOCK (app);
 }
 
 gboolean auto_adjust_bitrate(App *app)
@@ -873,7 +874,6 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 	App *app = user_data;
 	DreamRTSPserver *r = app->rtsp_server;
 
-	g_mutex_lock (&app->rtsp_mutex);
 	GstAppSrc *appsrc = NULL;
 	if ( appsink == r->vappsink )
 		appsrc = GST_APP_SRC(r->es_vappsrc);
@@ -893,14 +893,16 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 			{
 				GST_LOG("GST_BUFFER_FLAG_DELTA_UNIT dropping!");
 				gst_sample_unref(sample);
-				g_mutex_unlock (&app->rtsp_mutex);
+				DREAMRTSPSERVER_UNLOCK (app);
 				return GST_FLOW_OK;
 			}
 			else if (appsink == r->vappsink)
 			{
+				DREAMRTSPSERVER_LOCK (app);
 				r->rtsp_start_pts = GST_BUFFER_PTS (buffer);
 				r->rtsp_start_dts = GST_BUFFER_DTS (buffer);
 				GST_LOG_OBJECT(appsink, "frame is IFRAME! set rtsp_start_pts=%" GST_TIME_FORMAT " rtsp_start_dts=%" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), appsrc);
+				DREAMRTSPSERVER_UNLOCK (app);
 			}
 		}
 		if (GST_BUFFER_PTS (buffer) < r->rtsp_start_pts)
@@ -928,7 +930,6 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 			g_print (".");
 	}
 	gst_sample_unref (sample);
-	g_mutex_unlock (&app->rtsp_mutex);
 
 	return GST_FLOW_OK;
 }
@@ -969,7 +970,7 @@ void assert_tsmux(App *app)
 gboolean create_source_pipeline(App *app)
 {
 	GST_INFO_OBJECT(app, "create_source_pipeline");
-	g_mutex_lock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_LOCK (app);
 	app->pipeline = gst_pipeline_new (NULL);
 
 	GstBus *bus = gst_pipeline_get_bus (GST_PIPELINE (app->pipeline));
@@ -1065,7 +1066,7 @@ gboolean create_source_pipeline(App *app)
 	apply_source_properties(app);
 
 	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"create_source_pipeline");
-	g_mutex_unlock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_UNLOCK (app);
 	return TRUE;
 }
 
@@ -1097,7 +1098,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 	if (t->state == UPSTREAM_STATE_DISABLED)
 	{
 		assert_tsmux (app);
-		g_mutex_lock (&app->rtsp_mutex);
+		DREAMRTSPSERVER_LOCK (app);
 
 		t->id_signal_waiting = 0;
 		t->id_bitrate_measure = 0;
@@ -1146,7 +1147,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			gst_object_unref (t->tcpsink);
 			t->state = UPSTREAM_STATE_DISABLED;
 			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
-			g_mutex_unlock (&app->rtsp_mutex);
+			DREAMRTSPSERVER_UNLOCK (app);
 			return FALSE;
 		}
 
@@ -1207,7 +1208,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			}
 		}
 		GST_INFO_OBJECT(app, "enabled TCP upstream! upstreamState = UPSTREAM_STATE_CONNECTING");
-		g_mutex_unlock (&app->rtsp_mutex);
+		DREAMRTSPSERVER_UNLOCK (app);
 		return TRUE;
 	}
 	else
@@ -1215,7 +1216,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 	return FALSE;
 
 fail:
-	g_mutex_unlock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_UNLOCK (app);
 	disable_tcp_upstream(app);
 	return FALSE;
 }
@@ -1242,7 +1243,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		return FALSE;
 	}
 
-	g_mutex_lock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_LOCK (app);
 	DreamRTSPserver *r = app->rtsp_server;
 
 	if (r->state == RTSP_STATE_DISABLED)
@@ -1338,7 +1339,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 
 		g_signal_connect (r->ts_factory, "media-configure", (GCallback) media_configure, app);
 
-		g_mutex_unlock (&app->rtsp_mutex);
+		DREAMRTSPSERVER_UNLOCK (app);
 
 		gchar *credentials = "";
 		if (strlen(user)) {
@@ -1386,7 +1387,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 	}
 	else
 		GST_INFO_OBJECT (app, "rtsp server already enabled!");
-	g_mutex_unlock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_UNLOCK (app);
 	return FALSE;
 
 fail:
@@ -1524,12 +1525,12 @@ GstRTSPFilterResult remove_media_filter_func (GstRTSPSession * sess, GstRTSPSess
 	GstRTSPFilterResult res = GST_RTSP_FILTER_REF;
 	GstRTSPMedia *media;
 	media = gst_rtsp_session_media_get_media (session_media);
-	g_mutex_lock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_LOCK (app);
 	if (media == app->rtsp_server->es_media) {
 		GST_DEBUG_OBJECT (app, "matching RTSP media %p in filter, removing...", media);
 		res = GST_RTSP_FILTER_REMOVE;
 	}
-	g_mutex_unlock (&app->rtsp_mutex);
+	DREAMRTSPSERVER_UNLOCK (app);
 	return res;
 }
 
@@ -1625,7 +1626,7 @@ gboolean disable_rtsp_server(App *app)
 	{
 		if (app->rtsp_server->es_media)
 			gst_rtsp_server_client_filter(app->rtsp_server->server, (GstRTSPServerClientFilterFunc) remove_client_filter_func, app);
-		g_mutex_lock (&app->rtsp_mutex);
+		DREAMRTSPSERVER_LOCK (app);
 		gst_rtsp_mount_points_remove_factory (app->rtsp_server->mounts, app->rtsp_server->rtsp_es_path);
 		gst_rtsp_mount_points_remove_factory (app->rtsp_server->mounts, app->rtsp_server->rtsp_ts_path);
 		GSource *source = g_main_context_find_source_by_id (g_main_context_default (), r->source_id);
@@ -1661,7 +1662,7 @@ gboolean disable_rtsp_server(App *app)
 		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, rtsp_pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);
 
-		g_mutex_unlock (&app->rtsp_mutex);
+		DREAMRTSPSERVER_UNLOCK (app);
 		GST_INFO("rtsp_server disabled! set RTSP_STATE_DISABLED");
 		return TRUE;
 	}
