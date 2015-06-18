@@ -1479,7 +1479,7 @@ gboolean halt_source_pipeline(App* app)
 	GST_INFO_OBJECT(app, "halt_source_pipeline... setting sources to GST_STATE_READY");
 	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"halt_source_pipeline_pre");
 
-	if (gst_element_set_state (app->asrc, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS && gst_element_set_state (app->vsrc, GST_STATE_READY) == GST_STATE_CHANGE_SUCCESS)
+	if (gst_element_set_state (app->asrc, GST_STATE_NULL) == GST_STATE_CHANGE_SUCCESS && gst_element_set_state (app->vsrc, GST_STATE_NULL) == GST_STATE_CHANGE_SUCCESS)
 	{
 		GstPad *sinkpad;
 		gst_object_ref (app->aq);
@@ -1525,12 +1525,12 @@ GstRTSPFilterResult remove_media_filter_func (GstRTSPSession * sess, GstRTSPSess
 	GstRTSPFilterResult res = GST_RTSP_FILTER_REF;
 	GstRTSPMedia *media;
 	media = gst_rtsp_session_media_get_media (session_media);
-	DREAMRTSPSERVER_LOCK (app);
-	if (media == app->rtsp_server->es_media) {
+// 	DREAMRTSPSERVER_LOCK (app);
+	if (media == app->rtsp_server->es_media || media == app->rtsp_server->ts_media) {
 		GST_DEBUG_OBJECT (app, "matching RTSP media %p in filter, removing...", media);
 		res = GST_RTSP_FILTER_REMOVE;
 	}
-	DREAMRTSPSERVER_UNLOCK (app);
+// 	DREAMRTSPSERVER_UNLOCK (app);
 	return res;
 }
 
