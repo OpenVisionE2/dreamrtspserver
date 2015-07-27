@@ -587,7 +587,7 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	DreamRTSPserver *r = app->rtsp_server;
 	GST_INFO("no more clients -> media unprepared!");
 
-	DREAMRTSPSERVER_LOCK (app);
+// 	DREAMRTSPSERVER_LOCK (app);
 	if (media == r->es_media)
 	{
 		r->es_media = NULL;
@@ -608,7 +608,7 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 			r->state = RTSP_STATE_IDLE;
 		}
 	}
-	DREAMRTSPSERVER_UNLOCK (app);
+// 	DREAMRTSPSERVER_UNLOCK (app);
 }
 
 static void client_closed (GstRTSPClient * client, gpointer user_data)
@@ -1431,70 +1431,91 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 	GstElement *element = gst_pad_get_parent_element(pad);
 	GST_LOG_OBJECT (pad, "tsmux_pad_probe_unlink_cb % "GST_PTR_FORMAT, element);
 
-	if (element && (element == app->aq || element == app->vq))
-	{
-		GstPad *srcpad, *muxpad;
-		srcpad = gst_element_get_static_pad (element, "src");
-		muxpad = gst_pad_get_peer (srcpad);
-		if (GST_IS_PAD (muxpad))
-		{
-			GST_LOG_OBJECT (pad, "srcpad % " GST_PTR_FORMAT " muxpad % "GST_PTR_FORMAT" tsmux % "GST_PTR_FORMAT, srcpad, muxpad, app->tsmux);
-			gst_pad_unlink (srcpad, muxpad);
-			gst_element_release_request_pad (app->tsmux, muxpad);
-			gst_object_unref (muxpad);
-		}
-		else
-			GST_LOG_OBJECT (pad, "srcpad % " GST_PTR_FORMAT "'s peer was already unreffed");
-		gst_object_unref (srcpad);
-
-		gst_element_set_state (element, GST_STATE_READY);
-
-		GstState astate, vstate;
-		gst_element_get_state (GST_ELEMENT(app->aq), &astate, NULL, 1*GST_USECOND);
-		gst_element_get_state (GST_ELEMENT(app->vq), &vstate, NULL, 1*GST_USECOND);
-
-		if (astate == GST_STATE_READY && vstate == GST_STATE_READY && GST_IS_ELEMENT(app->tsmux))
-		{
-			gst_object_ref (app->tsmux);
-			GstPad *sinkpad;
-			sinkpad = gst_element_get_static_pad (app->tsmux, "src");
-			gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, tsmux_pad_probe_unlink_cb, app, NULL);
-			gst_object_unref (sinkpad);
-		}
-	}
-
-	else if (element && element == app->tsmux)
+	GstElement *source = NULL;
+	if (element == app->aq)
+		source = app->asrc;
+	else if (element == app->vq)
+		source = app->vsrc;
+	else if (element == app->tsmux)
 	{
 		gst_element_unlink (app->tsmux, app->tstee);
 		gst_bin_remove (GST_BIN (app->pipeline), app->tsmux);
 		gst_element_set_state (app->tsmux, GST_STATE_NULL);
 		gst_object_unref (app->tsmux);
 		app->tsmux = NULL;
+		DREAMRTSPSERVER_UNLOCK (app);
+		GST_LOG_OBJECT (pad, "finished unlinking and removing sources and tsmux");
+		return GST_PAD_PROBE_REMOVE;
 	}
+
+	if (gst_element_set_state (source, GST_STATE_NULL) != GST_STATE_CHANGE_SUCCESS)
+	{
+		GST_ERROR_OBJECT (pad, "can't set % " GST_PTR_FORMAT "'s state to GST_STATE_NULL", source);
+		goto fail;
+	}
+
+	GstPad *srcpad, *muxpad;
+	srcpad = gst_element_get_static_pad (element, "src");
+	muxpad = gst_pad_get_peer (srcpad);
+	if (GST_IS_PAD (muxpad))
+	{
+		GST_LOG_OBJECT (pad, "srcpad % " GST_PTR_FORMAT " muxpad % "GST_PTR_FORMAT" tsmux % "GST_PTR_FORMAT, srcpad, muxpad, app->tsmux);
+		gst_pad_unlink (srcpad, muxpad);
+		gst_element_release_request_pad (app->tsmux, muxpad);
+		gst_object_unref (muxpad);
+	}
+	else
+		GST_LOG_OBJECT (pad, "srcpad % " GST_PTR_FORMAT "'s peer was already unreffed");
+	gst_object_unref (srcpad);
+
+	gst_element_set_state (element, GST_STATE_READY);
+
+	GstState state;
+	gst_element_get_state (GST_ELEMENT(element), &state, NULL, 1*GST_USECOND);
+
+	if (state != GST_STATE_READY)
+	{
+		GST_ERROR_OBJECT (app, "%" GST_PTR_FORMAT"'s state = %s (should be GST_STATE_READY)", element, gst_element_state_get_name (state));
+		goto fail;
+	}
+	
+	GstPad *sinkpad;
+	GstElement *nextelem = NULL;
+	if (element == app->aq)
+	{
+		nextelem = app->vq;
+		sinkpad = gst_element_get_static_pad (nextelem, "sink");
+	}
+	if (element == app->vq)
+	{
+		nextelem = app->tsmux;
+		sinkpad = gst_element_get_static_pad (nextelem, "src");
+	}
+	GST_LOG_OBJECT (pad, "element % " GST_PTR_FORMAT " is now in GST_STATE_READY, installing idle probe on % "GST_PTR_FORMAT"", element, sinkpad);
+	if (GST_IS_ELEMENT(nextelem))
+	{
+		gst_object_ref (nextelem);
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, tsmux_pad_probe_unlink_cb, app, NULL);
+		gst_object_unref (sinkpad);
+		return GST_PAD_PROBE_REMOVE;
+	}
+
+fail:
+	DREAMRTSPSERVER_UNLOCK (app);
 	return GST_PAD_PROBE_REMOVE;
 }
 
 gboolean halt_source_pipeline(App* app)
 {
-	GST_INFO_OBJECT(app, "halt_source_pipeline... setting sources to GST_STATE_READY");
+	GST_INFO_OBJECT(app, "halt_source_pipeline...");
 	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"halt_source_pipeline_pre");
-
-	if (gst_element_set_state (app->asrc, GST_STATE_NULL) == GST_STATE_CHANGE_SUCCESS && gst_element_set_state (app->vsrc, GST_STATE_NULL) == GST_STATE_CHANGE_SUCCESS)
-	{
-		GstPad *sinkpad;
-		gst_object_ref (app->aq);
-		sinkpad = gst_element_get_static_pad (app->aq, "sink");
-		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, tsmux_pad_probe_unlink_cb, app, NULL);
-		gst_object_unref (sinkpad);
-
-		gst_object_ref (app->vq);
-		sinkpad = gst_element_get_static_pad (app->vq, "sink");
-		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, tsmux_pad_probe_unlink_cb, app, NULL);
-		gst_object_unref (sinkpad);
-		return TRUE;
-	}
-	GST_WARNING("can't set sources to GST_STATE_READY!");
-	return FALSE;
+	DREAMRTSPSERVER_LOCK (app);
+	GstPad *sinkpad;
+	gst_object_ref (app->aq);
+	sinkpad = gst_element_get_static_pad (app->aq, "sink");
+	gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, tsmux_pad_probe_unlink_cb, app, NULL);
+	gst_object_unref (sinkpad);
+	return TRUE;
 }
 
 gboolean pause_source_pipeline(App* app)

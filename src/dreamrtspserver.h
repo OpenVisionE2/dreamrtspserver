@@ -65,17 +65,17 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 
 #define DREAMRTSPSERVER_LOCK(obj) G_STMT_START {   \
     GST_LOG_OBJECT (obj,                           \
-                    "locking from thread %p",      \
+                    "LOCKING from thread %p",      \
                     g_thread_self ());             \
     g_mutex_lock (&obj->rtsp_mutex);               \
     GST_LOG_OBJECT (obj,                           \
-                    "locked from thread %p",       \
+                    "LOCKED from thread %p",       \
                     g_thread_self ());             \
 } G_STMT_END
 
 #define DREAMRTSPSERVER_UNLOCK(obj) G_STMT_START { \
     GST_LOG_OBJECT (obj,                           \
-                    "unlocking from thread %p",    \
+                    "UNLOCKING from thread %p",    \
                     g_thread_self ());             \
     g_mutex_unlock (&obj->rtsp_mutex);             \
 } G_STMT_END
