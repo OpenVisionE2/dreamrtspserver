@@ -246,7 +246,16 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 
 	GST_DEBUG("dbus get property %s from %s", property_name, sender);
 
-	if (g_strcmp0 (property_name, "upstreamState") == 0)
+	if (g_strcmp0 (property_name, "sourceState") == 0)
+	{
+		if (app->pipeline)
+		{
+			GstState state = GST_STATE_VOID_PENDING;
+			gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 1*GST_USECOND);
+			return g_variant_new_int32 ((int)state);
+		}
+	}
+	else if (g_strcmp0 (property_name, "upstreamState") == 0)
 	{
 		if (app->tcp_upstream)
 			return g_variant_new_int32 (app->tcp_upstream->state);
@@ -260,9 +269,10 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 			return g_variant_new_int32 (input_mode);
 		}
 	}
-	else if (g_strcmp0 (property_name, "clients") == 0)
+	else if (g_strcmp0 (property_name, "rtspClientCount") == 0)
 	{
-		return g_variant_new_int32 (g_list_length(app->rtsp_server->clients_list));
+		if (app->rtsp_server)
+			return g_variant_new_int32 (g_list_length(app->rtsp_server->clients_list));
 	}
 	else if (g_strcmp0 (property_name, "audioBitrate") == 0)
 	{
@@ -502,15 +512,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 			if (GST_MESSAGE_SRC(message) == GST_OBJECT(app->pipeline))
 			{
 				GST_DEBUG_OBJECT(app, "state transition %s -> %s", gst_element_state_get_name(old_state), gst_element_state_get_name(new_state));
-				GstStateChange transition = (GstStateChange)GST_STATE_TRANSITION(old_state, new_state);
-				switch(transition)
-				{
-					case GST_STATE_CHANGE_NULL_TO_READY:
-						send_signal (app, "sourceReady", NULL);
-						break;
-					default:
-						break;
-				}
+				send_signal (app, "sourceStateChanged", g_variant_new("(i)", (int) new_state));
 			}
 			break;
 		}
@@ -615,7 +617,9 @@ static void client_closed (GstRTSPClient * client, gpointer user_data)
 {
 	App *app = user_data;
 	app->rtsp_server->clients_list = g_list_remove(g_list_first (app->rtsp_server->clients_list), client);
-	GST_INFO("client_closed  (number of clients: %i)", g_list_length(app->rtsp_server->clients_list));
+	gint no_clients = g_list_length(app->rtsp_server->clients_list);
+	GST_INFO("client_closed  (number of clients: %i)", no_clients);
+	send_signal (app, "rtspClientCountChanged", g_variant_new("(is)", no_clients, ""));
 }
 
 static void client_connected (GstRTSPServer * server, GstRTSPClient * client, gpointer user_data)
@@ -623,8 +627,10 @@ static void client_connected (GstRTSPServer * server, GstRTSPClient * client, gp
 	App *app = user_data;
 	app->rtsp_server->clients_list = g_list_append(app->rtsp_server->clients_list, client);
 	const gchar *ip = gst_rtsp_connection_get_ip (gst_rtsp_client_get_connection (client));
-	GST_INFO("client_connected %" GST_PTR_FORMAT " from %s  (number of clients: %i)", client, ip, g_list_length(app->rtsp_server->clients_list));
+	gint no_clients = g_list_length(app->rtsp_server->clients_list);
+	GST_INFO("client_connected %" GST_PTR_FORMAT " from %s  (number of clients: %i)", client, ip, no_clients);
 	g_signal_connect (client, "closed", (GCallback) client_closed, app);
+	send_signal (app, "rtspClientCountChanged", g_variant_new("(is)", no_clients, ip));
 }
 
 static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media, gpointer user_data)
@@ -1443,6 +1449,8 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 		gst_element_set_state (app->tsmux, GST_STATE_NULL);
 		gst_object_unref (app->tsmux);
 		app->tsmux = NULL;
+		if (gst_element_set_state (app->pipeline, GST_STATE_READY) != GST_STATE_CHANGE_SUCCESS)
+			GST_WARNING_OBJECT (pad, "error bringing pipeline back to ready");
 		DREAMRTSPSERVER_UNLOCK (app);
 		GST_LOG_OBJECT (pad, "finished unlinking and removing sources and tsmux");
 		return GST_PAD_PROBE_REMOVE;
@@ -1478,7 +1486,7 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 		GST_ERROR_OBJECT (app, "%" GST_PTR_FORMAT"'s state = %s (should be GST_STATE_READY)", element, gst_element_state_get_name (state));
 		goto fail;
 	}
-	
+
 	GstPad *sinkpad;
 	GstElement *nextelem = NULL;
 	if (element == app->aq)
