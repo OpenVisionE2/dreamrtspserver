@@ -26,6 +26,7 @@
 #include <gst/gst.h>
 #include <gst/app/app.h>
 #include <gst/rtsp-server/rtsp-server.h>
+#include "gstdreamrtsp.h"
 
 GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 #define GST_CAT_DEFAULT dreamrtspserver_debug
@@ -118,9 +119,9 @@ typedef struct {
 } DreamTCPupstream;
 
 typedef struct {
-	GstRTSPServer *server;
+	GstDreamRTSPServer *server;
 	GstRTSPMountPoints *mounts;
-	GstRTSPMediaFactory *es_factory, *ts_factory;
+	GstDreamRTSPMediaFactory *es_factory, *ts_factory;
 	GstRTSPMedia *es_media, *ts_media;
 	GstElement *artspq, *vrtspq, *tsrtspq;
 	GstElement *es_aappsrc, *es_vappsrc;
@@ -133,6 +134,7 @@ typedef struct {
 	gchar *rtsp_ts_path, *rtsp_es_path;
 	guint source_id;
 	rtspState state;
+	gchar *uri_parameters;
 } DreamRTSPserver;
 
 typedef struct {
@@ -205,6 +207,10 @@ static const gchar introspection_xml[] =
   "      <arg type='s' name='host' direction='out'/>"
   "    </signal>"
   "    <property type='i' name='rtspClientCount' access='read'/>"
+  "    <signal name='uriParametersReceived'>"
+  "      <arg type='s' name='parameters' direction='out'/>"
+  "    </signal>"
+  "    <property type='s' name='uriParameters' access='read'/>"
   "    <property type='b' name='autoBitrate' access='readwrite'/>"
   "    <signal name='encoderError'/>"
   "  </interface>"
