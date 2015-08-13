@@ -678,7 +678,7 @@ static void uri_parametrized (GstDreamRTSPMediaFactory * factory, gchar *paramet
 	App *app = user_data;
 	GST_INFO_OBJECT (app, "parametrized uri query: '%s'", parameters);
 	app->rtsp_server->uri_parameters = g_strdup(parameters);
-	send_signal (app, "uriParametersReceived", g_variant_new("(s)", app->rtsp_server->uri_parameters));
+	send_signal (app, "uriParametersChanged", g_variant_new("(s)", app->rtsp_server->uri_parameters));
 }
 
 static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)

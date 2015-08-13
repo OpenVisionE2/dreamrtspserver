@@ -207,7 +207,7 @@ static const gchar introspection_xml[] =
   "      <arg type='s' name='host' direction='out'/>"
   "    </signal>"
   "    <property type='i' name='rtspClientCount' access='read'/>"
-  "    <signal name='uriParametersReceived'>"
+  "    <signal name='uriParametersChanged'>"
   "      <arg type='s' name='parameters' direction='out'/>"
   "    </signal>"
   "    <property type='s' name='uriParameters' access='read'/>"
