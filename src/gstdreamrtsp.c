@@ -53,7 +53,7 @@ static void gst_dream_rtsp_client_init (GstDreamRTSPClient * client)
 {
 	GstDreamRTSPClientPrivate *priv = GST_DREAM_RTSP_CLIENT_GET_PRIVATE (client);
 	client->priv = priv;
-	GST_WARNING_OBJECT (client, "Client is initialized");
+	GST_DEBUG_OBJECT (client, "Client is initialized");
 }
 
 static gchar *make_path_extract_sref_from_uri (GstRTSPClient * client, const GstRTSPUrl * uri)
@@ -89,7 +89,7 @@ static void gst_dream_rtsp_server_init (GstDreamRTSPServer *server)
 	server->priv = priv;
 	g_mutex_init (&priv->lock);
 	
-	GST_WARNING_OBJECT (server, "dream_rtsp_server_init lock@%p GstDreamRTSPServer@%p", priv->lock, server);
+	GST_DEBUG_OBJECT (server, "dream_rtsp_server_init lock@%p GstDreamRTSPServer@%p", priv->lock, server);
 }
 
 static void gst_dream_rtsp_server_class_init (GstDreamRTSPServerClass * klass)
@@ -106,7 +106,7 @@ static void gst_dream_rtsp_server_class_init (GstDreamRTSPServerClass * klass)
 		GST_DEBUG_BOLD | GST_DEBUG_FG_YELLOW | GST_DEBUG_BG_BLUE,
 		"Dreambox RTSP server daemon");
 
-	GST_WARNING_OBJECT (klass, "Server class is initialized");
+	GST_DEBUG_OBJECT (klass, "Server class is initialized");
 }
 
 static GstRTSPClient *gst_dream_rtsp_create_client (GstRTSPServer * server)
@@ -181,6 +181,8 @@ static const gchar *factory_key = "GstDreamRTSPMediaFactory";
 
 static void gst_dream_rtsp_media_factory_finalize (GObject * obj);
 static GstRTSPMedia *rtsp_dream_media_factory_construct (GstRTSPMediaFactory * factory, const GstRTSPUrl * url);
+static gchar *rtsp_dream_media_factory_gen_key (GstRTSPMediaFactory * factory, const GstRTSPUrl * url);
+
 
 G_DEFINE_TYPE (GstDreamRTSPMediaFactory, gst_dream_rtsp_media_factory, GST_TYPE_RTSP_MEDIA_FACTORY);
 
@@ -204,6 +206,7 @@ gst_dream_rtsp_media_factory_class_init (GstDreamRTSPMediaFactoryClass * klass)
 	gobject_class->finalize = gst_dream_rtsp_media_factory_finalize;
 
 	mediafactory_class->construct = rtsp_dream_media_factory_construct;
+	mediafactory_class->gen_key = rtsp_dream_media_factory_gen_key;
 
 	gst_dream_rtsp_media_factory_signals[SIGNAL_URI_PARAMETRIZED] =
 		g_signal_new ("uri-parametrized", G_TYPE_FROM_CLASS (klass),
@@ -239,6 +242,18 @@ gst_dream_rtsp_media_factory_finalize (GObject * obj)
 	G_OBJECT_CLASS (gst_dream_rtsp_media_factory_parent_class)->finalize (obj);
 }
 
+static gchar *
+rtsp_dream_media_factory_gen_key (GstRTSPMediaFactory* factory, const GstRTSPUrl* url)
+{
+	gchar *result;
+	guint16 port;
+
+	gst_rtsp_url_get_port (url, &port);
+	result = g_strdup_printf ("%u%s", port, url->abspath);
+
+	return result;
+}
+
 static GstRTSPMedia *
 rtsp_dream_media_factory_construct (GstRTSPMediaFactory * factory, const GstRTSPUrl * url)
 {
@@ -246,7 +261,7 @@ rtsp_dream_media_factory_construct (GstRTSPMediaFactory * factory, const GstRTSP
 	GstElement *element, *pipeline;
 	GstRTSPMediaFactoryClass *klass;
 
-	GST_WARNING_OBJECT (factory, "abspath=%s, query=%s", url->abspath, url->query);
+	GST_DEBUG_OBJECT (factory, "abspath=%s, query=%s", url->abspath, url->query);
 	
 	klass = GST_RTSP_MEDIA_FACTORY_GET_CLASS (factory);
 
