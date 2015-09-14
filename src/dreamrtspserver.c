@@ -907,7 +907,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		GstBuffer *buffer = gst_sample_get_buffer (sample);
 		GstCaps *caps = gst_sample_get_caps (sample);
 
-		GST_LOG_OBJECT(appsink, "original PTS %" GST_TIME_FORMAT " DTS %" GST_TIME_FORMAT " @ %"GST_PTR_FORMAT"", GST_TIME_ARGS (GST_BUFFER_PTS (buffer)), GST_TIME_ARGS (GST_BUFFER_DTS (buffer)), appsrc);
+		GST_LOG_OBJECT(appsink, "% "GST_PTR_FORMAT" @ %"GST_PTR_FORMAT"", buffer, appsrc);
 		if (r->rtsp_start_pts == GST_CLOCK_TIME_NONE) {
 			if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
 			{
@@ -916,7 +916,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 				DREAMRTSPSERVER_UNLOCK (app);
 				return GST_FLOW_OK;
 			}
-			else if (appsink == r->vappsink)
+			else if (appsink == r->vappsink || appsink == r->tsappsink)
 			{
 				DREAMRTSPSERVER_LOCK (app);
 				r->rtsp_start_pts = GST_BUFFER_PTS (buffer);
@@ -991,7 +991,7 @@ gboolean create_source_pipeline(App *app)
 {
 	GST_INFO_OBJECT(app, "create_source_pipeline");
 	DREAMRTSPSERVER_LOCK (app);
-	app->pipeline = gst_pipeline_new (NULL);
+	app->pipeline = gst_pipeline_new ("dreamrtspserver_source_pipeline");
 
 	GstBus *bus = gst_pipeline_get_bus (GST_PIPELINE (app->pipeline));
 	gst_bus_add_signal_watch (bus);
@@ -1093,11 +1093,12 @@ gboolean create_source_pipeline(App *app)
 static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
 {
 	App *app = user_data;
+
 	GstBuffer *token_buf = gst_buffer_new_wrapped (app->tcp_upstream->token, TOKEN_LEN);
 	GstPad * srcpad = gst_element_get_static_pad (app->tcp_upstream->tstcpq, "src");
 
 	GST_INFO ("injecting authorization on pad %s:%s, created token_buf %" GST_PTR_FORMAT "", GST_DEBUG_PAD_NAME (sinkpad), token_buf);
-	gst_pad_remove_probe (sinkpad, app->tcp_upstream->inject_id);
+	gst_pad_remove_probe (sinkpad, info->id);
 	gst_pad_push (srcpad, gst_buffer_ref(token_buf));
 
 	return GST_PAD_PROBE_REMOVE;
@@ -1130,14 +1131,13 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		t->tcpsink = gst_element_factory_make ("tcpclientsink", NULL);
 
 		if (!(t->tstcpq && t->tcpsink ))
-		g_error ("Failed to create tcp upstream element(s):%s%s", t->tstcpq?"":"  ts queue", t->tcpsink?"":"  tcpclientsink" );
-
-		g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
+			g_error ("Failed to create tcp upstream element(s):%s%s", t->tstcpq?"":"  ts queue", t->tcpsink?"":"  tcpclientsink" );
 
 		g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
-		g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
+		gulong handler_id = g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
+		GST_INFO_OBJECT (app, "installed %" GST_PTR_FORMAT " overrun handler id=%lu", t->tstcpq, handler_id);
 
-		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(1)*GST_SECOND, NULL);
+		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(2)*GST_SECOND, NULL);
 		g_object_set (t->tcpsink, "blocksize", BLOCK_SIZE, NULL);
 
 		g_object_set (t->tcpsink, "host", upstream_host, NULL);
@@ -1195,9 +1195,11 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		{
 			sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
 			strcpy(t->token, token);
-			t->inject_id = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) inject_authorization, app, NULL);
+			gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER|GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) inject_authorization, app, NULL);
 			gst_object_unref (sinkpad);
 		}
+		else
+			GST_DEBUG_OBJECT (app, "no token specified!");
 		sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
 		GST_DEBUG_OBJECT(app, "gst_element_set_state (app->pipeline, GST_STATE_PLAYING) = %i", sret);
 

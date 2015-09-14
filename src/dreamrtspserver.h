@@ -106,7 +106,6 @@ typedef enum {
 
 typedef struct {
 	GstElement *tstcpq, *tcpsink;
-	gulong inject_id;
 	char token[TOKEN_LEN+1];
 	upstreamState state;
 	guint overrun_counter;
