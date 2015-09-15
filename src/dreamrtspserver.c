@@ -19,6 +19,14 @@
 #include "dreamrtspserver.h"
 #include "gstdreamrtsp.h"
 
+#define QUEUE_DEBUG \
+		guint cur_bytes, cur_buf; \
+		guint64 cur_time; \
+		g_object_get (t->tstcpq, "current-level-bytes", &cur_bytes, NULL); \
+		g_object_get (t->tstcpq, "current-level-buffers", &cur_buf, NULL); \
+		g_object_get (t->tstcpq, "current-level-time", &cur_time, NULL);
+
+
 static void send_signal (App *app, const gchar *signal_name, GVariant *parameters)
 {
 	if (app->dbus_connection)
@@ -506,7 +514,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 	App *app = user_data;
 
 // 	DREAMRTSPSERVER_LOCK (app);
-	GST_LOG_OBJECT (app, "message %" GST_PTR_FORMAT "", message);
+	GST_TRACE_OBJECT (app, "message %" GST_PTR_FORMAT "", message);
 	switch (GST_MESSAGE_TYPE (message)) {
 		case GST_MESSAGE_STATE_CHANGED:
 		{
@@ -700,18 +708,28 @@ static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInf
 {
 	App *app = user_data;
 	DreamTCPupstream *t = app->tcp_upstream;
-	GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER (info);
 	GstClockTime now = gst_clock_get_time (app->clock);
-	if (GST_IS_BUFFER(buffer))
-		t->bitrate_sum += gst_buffer_get_size (buffer);
-	GST_DEBUG_OBJECT (app, "size was=%zu bitrate_sum=%zu now=%" GST_TIME_FORMAT " avg at %" GST_TIME_FORMAT "", gst_buffer_get_size (buffer), t->bitrate_sum, GST_TIME_ARGS(now),GST_TIME_ARGS(t->measure_start+BITRATE_AVG_PERIOD));
-	guint cur_bytes, cur_buf;
-	guint64 cur_time;
-	g_object_get (t->tstcpq, "current-level-bytes", &cur_bytes, NULL);
-	g_object_get (t->tstcpq, "current-level-buffers", &cur_buf, NULL);
-	g_object_get (t->tstcpq, "current-level-time", &cur_time, NULL);
-	GST_DEBUG_OBJECT (app, "queue properties current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "", cur_bytes, cur_buf, GST_TIME_ARGS(cur_time));
+	GstBuffer *buffer;
+	guint idx = 0, num_buffers = 1;
+	do {
+		if (info->type & GST_PAD_PROBE_TYPE_BUFFER)
+		{
+			buffer = GST_PAD_PROBE_INFO_BUFFER (info);
+		}
+		else if (info->type & GST_PAD_PROBE_TYPE_BUFFER_LIST)
+		{
+			GstBufferList *bufferlist = GST_PAD_PROBE_INFO_BUFFER_LIST (info);
+			num_buffers = gst_buffer_list_length (bufferlist);
+			buffer = gst_buffer_list_get (bufferlist, idx);
+		}
+		if (GST_IS_BUFFER(buffer))
+			t->bitrate_sum += gst_buffer_get_size (buffer);
+		idx++;
+	} while (idx < num_buffers);
 
+	QUEUE_DEBUG;
+	GST_LOG_OBJECT (app, "probetype=%i num_buffers=%i data=% "GST_PTR_FORMAT " size was=%zu bitrate_sum=%zu now=%" GST_TIME_FORMAT " avg at %" GST_TIME_FORMAT " queue properties current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "",
+			info->type, num_buffers, info->data, gst_buffer_get_size (buffer), t->bitrate_sum, GST_TIME_ARGS(now), GST_TIME_ARGS(t->measure_start+BITRATE_AVG_PERIOD), cur_bytes, cur_buf, GST_TIME_ARGS(cur_time));
 	if (now > t->measure_start+BITRATE_AVG_PERIOD)
 	{
 		gint bitrate = t->bitrate_sum*8/GST_TIME_AS_MSECONDS(BITRATE_AVG_PERIOD);
@@ -753,11 +771,13 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 {
 	App *app = user_data;
 	DreamTCPupstream *t = app->tcp_upstream;
-	GST_DEBUG_OBJECT (queue, "queue underrun");
+	QUEUE_DEBUG;
+	GST_DEBUG_OBJECT (app, "queue underrun! properties: current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "", cur_bytes, cur_buf, GST_TIME_ARGS(cur_time));
 	if (queue == t->tstcpq && app->rtsp_server->state != RTSP_STATE_IDLE)
 	{
 		if (unpause_source_pipeline(app))
 		{
+// 			g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 			g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(-1), NULL);
 			g_signal_handlers_disconnect_by_func (queue, G_CALLBACK (queue_underrun), app);
 			g_signal_connect (queue, "overrun", G_CALLBACK (queue_overrun), app);
@@ -766,7 +786,7 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 			if (t->id_bitrate_measure == 0)
 			{
 				GstPad *sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
-				t->id_bitrate_measure = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) bitrate_measure_probe, app, NULL);
+				t->id_bitrate_measure = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER|GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) bitrate_measure_probe, app, NULL);
 				gst_object_unref (sinkpad);
 			}
 			t->measure_start = gst_clock_get_time (app->clock);
@@ -782,12 +802,15 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 	App *app = user_data;
 	DreamTCPupstream *t = app->tcp_upstream;
 	DREAMRTSPSERVER_LOCK (app);
-	if (queue == t->tstcpq && app->rtsp_server->state != RTSP_STATE_IDLE)
+	if (queue == t->tstcpq/* && app->rtsp_server->state != RTSP_STATE_IDLE*/) //!!!TODO
 	{
+		QUEUE_DEBUG;
+		GST_DEBUG_OBJECT (app, "% "GST_PTR_FORMAT " overrun! properties: current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT " rtsp_server->state=%i", queue, cur_bytes, cur_buf, GST_TIME_ARGS(cur_time), app->rtsp_server->state);
 		GstClockTime now = gst_clock_get_time (app->clock);
 		if (t->state == UPSTREAM_STATE_CONNECTING)
 		{
 			GST_DEBUG_OBJECT (queue, "initial queue overrun after connect");
+// 			g_object_set (G_OBJECT (t->tstcpq), "leaky", 0, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, "min-threshold-buffers", 0, NULL);
 			g_signal_handlers_disconnect_by_func(t->tstcpq, G_CALLBACK (queue_overrun), app);
 			upstream_set_waiting (app);
 		}
@@ -826,7 +849,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 			{
 				GST_DEBUG_OBJECT (queue, "SET upstream_set_waiting timeout!");
 				GstPad *sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
-				t->id_resume = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER, (GstPadProbeCallback) cancel_waiting_probe, app, NULL);
+				t->id_resume = gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_BUFFER|GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) cancel_waiting_probe, app, NULL);
 				gst_object_unref (sinkpad);
 				if (t->id_signal_waiting)
 					g_source_remove (t->id_signal_waiting);
@@ -1133,7 +1156,8 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		if (!(t->tstcpq && t->tcpsink ))
 			g_error ("Failed to create tcp upstream element(s):%s%s", t->tstcpq?"":"  ts queue", t->tcpsink?"":"  tcpclientsink" );
 
-		g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+		g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 400, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(0), NULL);
+
 		gulong handler_id = g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
 		GST_INFO_OBJECT (app, "installed %" GST_PTR_FORMAT " overrun handler id=%lu", t->tstcpq, handler_id);
 
@@ -1560,7 +1584,7 @@ gboolean unpause_source_pipeline(App* app)
 
 	if (gst_element_set_state (app->asrc, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE || gst_element_set_state (app->vsrc, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
 	{
-		GST_WARNING("can't set sources to GST_STATE_PAUSED!");
+		GST_WARNING("can't set sources to GST_STATE_PLAYING!");
 		return FALSE;
 	}
 	return TRUE;
@@ -1863,6 +1887,8 @@ int main (int argc, char *argv[])
 
 	g_main_loop_run (app.loop);
 
+	if (app.tcp_upstream->state > UPSTREAM_STATE_DISABLED)
+		disable_tcp_upstream(&app);
 	free(app.tcp_upstream);
 	if (app.rtsp_server->state >= RTSP_STATE_IDLE)
 		disable_rtsp_server(&app);
