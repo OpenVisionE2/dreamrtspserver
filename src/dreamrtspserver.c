@@ -240,6 +240,7 @@ gboolean upstream_resume_transmitting(App *app)
 	t->overrun_counter = 0;
 	t->overrun_period = GST_CLOCK_TIME_NONE;
 	t->id_signal_waiting = 0;
+	t->id_signal_keepalive = 0;
 	return G_SOURCE_REMOVE;
 }
 
@@ -502,7 +503,7 @@ static void on_name_acquired (GDBusConnection *connection,
 static void on_name_lost (GDBusConnection *connection,
 			  const gchar     *name,
 			  gpointer         user_data)
-{
+	{
 	App *app = user_data;
 	app->dbus_connection = NULL;
 	GST_WARNING ("lost dbus name (\"%s\" @ %p)", name, connection);
@@ -699,6 +700,8 @@ static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo
 		GST_DEBUG_OBJECT (app, "cancel upstream_set_waiting timeout because data flow was restored!");
 		g_source_remove (t->id_signal_waiting);
 		t->id_signal_waiting = 0;
+		g_source_remove (t->id_signal_keepalive);
+		t->id_signal_waiting = 0;
 	}
 	t->id_resume = 0;
 	return GST_PAD_PROBE_REMOVE;
@@ -741,8 +744,19 @@ static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInf
 	return GST_PAD_PROBE_OK;
 }
 
-gboolean upstream_set_waiting(App *app)
+gboolean upstream_keep_alive (App *app)
 {
+	GstBuffer *buf = gst_buffer_new_allocate (NULL, TS_PACK_SIZE, NULL);
+	gst_buffer_memset (buf, 0, 0x00, TS_PACK_SIZE);
+	GstPad * srcpad = gst_element_get_static_pad (app->tcp_upstream->tstcpq, "src");
+	GST_INFO ("injecting keepalive %" GST_PTR_FORMAT " on pad %s:%s", buf, GST_DEBUG_PAD_NAME (srcpad));
+	gst_pad_push (srcpad, gst_buffer_ref(buf));
+	return G_SOURCE_REMOVE;
+}
+
+gboolean upstream_set_waiting (App *app)
+{
+	DREAMRTSPSERVER_LOCK (app);
 	DreamTCPupstream *t = app->tcp_upstream;
 	t->overrun_counter = 0;
 	t->overrun_period = GST_CLOCK_TIME_NONE;
@@ -764,6 +778,9 @@ gboolean upstream_set_waiting(App *app)
 	send_signal (app, "tcpBitrate", g_variant_new("(i)", 0));
 	gst_object_unref (sinkpad);
 	pause_source_pipeline(app);
+	t->id_signal_waiting = 0;
+	t->id_signal_keepalive = g_timeout_add_seconds (5, (GSourceFunc) upstream_keep_alive, app);
+	DREAMRTSPSERVER_UNLOCK (app);
 	return G_SOURCE_REMOVE;
 }
 
@@ -773,10 +790,11 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 	DreamTCPupstream *t = app->tcp_upstream;
 	QUEUE_DEBUG;
 	GST_DEBUG_OBJECT (app, "queue underrun! properties: current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "", cur_bytes, cur_buf, GST_TIME_ARGS(cur_time));
-	if (queue == t->tstcpq && app->rtsp_server->state != RTSP_STATE_IDLE)
+	if (queue == t->tstcpq && app->rtsp_server->state != RTSP_STATE_RUNNING)
 	{
 		if (unpause_source_pipeline(app))
 		{
+			DREAMRTSPSERVER_LOCK (app);
 // 			g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 			g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(-1), NULL);
 			g_signal_handlers_disconnect_by_func (queue, G_CALLBACK (queue_underrun), app);
@@ -793,6 +811,7 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 			t->bitrate_sum = t->bitrate_avg = 0;
 			if (t->overrun_period == GST_CLOCK_TIME_NONE)
 				t->overrun_period = gst_clock_get_time (app->clock);
+			DREAMRTSPSERVER_UNLOCK (app);
 		}
 	}
 }
@@ -812,7 +831,9 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 			GST_DEBUG_OBJECT (queue, "initial queue overrun after connect");
 // 			g_object_set (G_OBJECT (t->tstcpq), "leaky", 0, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, "min-threshold-buffers", 0, NULL);
 			g_signal_handlers_disconnect_by_func(t->tstcpq, G_CALLBACK (queue_overrun), app);
+			DREAMRTSPSERVER_UNLOCK (app);
 			upstream_set_waiting (app);
+			return;
 		}
 		else if (t->state == UPSTREAM_STATE_TRANSMITTING)
 		{
@@ -1145,6 +1166,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		DREAMRTSPSERVER_LOCK (app);
 
 		t->id_signal_waiting = 0;
+		t->id_signal_keepalive = 0;
 		t->id_bitrate_measure = 0;
 		t->id_resume = 0;
 		t->state = UPSTREAM_STATE_CONNECTING;
@@ -1780,7 +1802,7 @@ static GstPadProbeReturn upstream_pad_probe_unlink_cb (GstPad * pad, GstPadProbe
 		t->tstcpq = NULL;
 		t->tcpsink = NULL;
 
-		if (app->rtsp_server->state == RTSP_STATE_DISABLED)
+		if (app->rtsp_server->state < RTSP_STATE_RUNNING)
 			halt_source_pipeline(app);
 		GST_INFO("tcp_upstream disabled!");
 		t->state = UPSTREAM_STATE_DISABLED;
