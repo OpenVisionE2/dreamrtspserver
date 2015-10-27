@@ -234,6 +234,7 @@ static void send_signal (App *app, const gchar *signal_name, GVariant *parameter
 static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_data);
 static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data);
 static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data);
+gboolean upstream_keep_alive(App *app);
 gboolean upstream_set_waiting(App *app);
 gboolean upstream_resume_transmitting(App *app);
 static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data);
