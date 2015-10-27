@@ -744,16 +744,6 @@ static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInf
 	return GST_PAD_PROBE_OK;
 }
 
-gboolean upstream_keep_alive (App *app)
-{
-	GstBuffer *buf = gst_buffer_new_allocate (NULL, TS_PACK_SIZE, NULL);
-	gst_buffer_memset (buf, 0, 0x00, TS_PACK_SIZE);
-	GstPad * srcpad = gst_element_get_static_pad (app->tcp_upstream->tstcpq, "src");
-	GST_INFO ("injecting keepalive %" GST_PTR_FORMAT " on pad %s:%s", buf, GST_DEBUG_PAD_NAME (srcpad));
-	gst_pad_push (srcpad, gst_buffer_ref(buf));
-	return G_SOURCE_REMOVE;
-}
-
 gboolean upstream_set_waiting (App *app)
 {
 	DREAMRTSPSERVER_LOCK (app);
@@ -777,9 +767,15 @@ gboolean upstream_set_waiting (App *app)
 	}
 	send_signal (app, "tcpBitrate", g_variant_new("(i)", 0));
 	gst_object_unref (sinkpad);
+
+	GstBuffer *buf = gst_buffer_new_allocate (NULL, TS_PACK_SIZE, NULL);
+	gst_buffer_memset (buf, 0, 0x00, TS_PACK_SIZE);
+	GstPad * srcpad = gst_element_get_static_pad (app->tcp_upstream->tstcpq, "src");
+	GST_INFO ("injecting keepalive %" GST_PTR_FORMAT " on pad %s:%s", buf, GST_DEBUG_PAD_NAME (srcpad));
+	gst_pad_push (srcpad, gst_buffer_ref(buf));
+
 	pause_source_pipeline(app);
 	t->id_signal_waiting = 0;
-	t->id_signal_keepalive = g_timeout_add_seconds (5, (GSourceFunc) upstream_keep_alive, app);
 	DREAMRTSPSERVER_UNLOCK (app);
 	return G_SOURCE_REMOVE;
 }
