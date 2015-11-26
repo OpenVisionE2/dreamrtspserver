@@ -21,6 +21,8 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <gio/gio.h>
 #include <glib-unix.h>
 #include <gst/gst.h>
@@ -34,6 +36,11 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 #define DEFAULT_RTSP_PORT 554
 #define DEFAULT_RTSP_PATH "/stream"
 #define RTSP_ES_PATH_SUFX "-es"
+
+#define HLS_PATH "/tmp/hls"
+#define HLS_FRAGMENT_DURATION 10
+#define HLS_FRAGMENT_NAME "segment%05d.ts"
+#define HLS_PLAYLIST_NAME "dream.m3u8"
 
 #define TOKEN_LEN 36
 
@@ -104,6 +111,12 @@ typedef enum {
         RTSP_STATE_RUNNING = 2
 } rtspState;
 
+typedef enum {
+        HLS_STATE_DISABLED = 0,
+        HLS_STATE_IDLE = 1,
+	HLS_STATE_RUNNING = 2
+} hlsState;
+
 typedef struct {
 	GstElement *tstcpq, *tcpsink;
 	char token[TOKEN_LEN+1];
@@ -142,6 +155,12 @@ typedef struct {
 } SourceProperties;
 
 typedef struct {
+	GstElement *queue;
+	GstElement *hlssink;
+	hlsState state;
+} DreamHLSserver;
+
+typedef struct {
 	GDBusConnection *dbus_connection;
 	GMainLoop *loop;
 	GstElement *pipeline;
@@ -151,6 +170,7 @@ typedef struct {
 	GstElement *atee, *vtee;
 	DreamTCPupstream *tcp_upstream;
 	DreamRTSPserver *rtsp_server;
+	DreamHLSserver *hls_server;
 	GMutex rtsp_mutex;
 	GstClock *clock;
 	SourceProperties source_properties;
@@ -176,6 +196,10 @@ static const gchar introspection_xml[] =
   "    <method name='setResolution'>"
   "      <arg type='i' name='width' direction='in'/>"
   "      <arg type='i' name='height' direction='in'/>"
+  "    </method>"
+  "    <method name='enableHLS'>"
+  "      <arg type='b' name='state' direction='in'/>"
+  "      <arg type='b' name='result' direction='out'/>"
   "    </method>"
 #if HAVE_UPSTREAM
   "    <method name='enableUpstream'>"
@@ -249,6 +273,10 @@ gboolean pause_source_pipeline(App *app);
 gboolean unpause_source_pipeline(App *app);
 gboolean destroy_pipeline(App *app);
 gboolean quit_signal(gpointer loop);
+
+DreamHLSserver *create_hls_server(App *app);
+gboolean enable_hls_server(App *app);
+gboolean disable_hls_server(App *app);
 
 gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstream_port, const gchar *token);
 gboolean disable_tcp_upstream(App *app);

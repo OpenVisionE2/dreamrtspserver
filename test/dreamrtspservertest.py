@@ -24,6 +24,7 @@ class StreamServerControl(object):
 	RES_PAL = [720, 576]
 
 	[INPUT_MODE_LIVE, INPUT_MODE_HDMI_IN, INPUT_MODE_BACKGROUND] = range(3)
+	[HLS_STATE_DISABLED, HLS_STATE_IDLE, HLS_STATE_RUNNING] = range(3)
 	[RTSP_STATE_DISABLED, RTSP_STATE_IDLE, RTSP_STATE_RUNNING] = range(3)
 	[UPSTREAM_STATE_DISABLED, UPSTREAM_STATE_CONNECTING, UPSTREAM_STATE_WAITING, UPSTREAM_STATE_TRANSMITTING, UPSTREAM_STATE_OVERLOAD] = range(5)
 
@@ -34,6 +35,9 @@ class StreamServerControl(object):
 		self._bus = dbus.SystemBus()
 		self._proxy = self._bus.get_object(self.INTERFACE, self.OBJECT)
 		self._interface = dbus.Interface(self._proxy, self.INTERFACE)
+
+	def enableHLS(self, state):
+		return self._interface.enableHLS(state)
 
 	def enableRTSP(self, state, path='', port=0, user='', pw=''):
 		return self._interface.enableRTSP(state, path, port, user, pw)

@@ -431,6 +431,29 @@ static void handle_method_call (GDBusConnection       *connection,
 		}
 		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
 	}
+	if (g_strcmp0 (method_name, "enableHLS") == 0)
+	{
+		gboolean result = FALSE;
+		if (app->pipeline)
+		{
+			gboolean state;
+			g_variant_get (parameters, "(b)", &state);
+			GST_DEBUG("app->pipeline=%p, enableHLS state=%i", app->pipeline, state);
+
+			if (state == TRUE && app->hls_server->state >= HLS_STATE_DISABLED)
+				result = enable_hls_server(app);
+			else if (state == FALSE && app->hls_server->state >= HLS_STATE_IDLE)
+                        {
+				result = disable_hls_server(app);
+				if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->rtsp_server->state == RTSP_STATE_DISABLED)
+				{
+					destroy_pipeline(app);
+					create_source_pipeline(app);
+				}
+                        }
+		}
+		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
+	}
 	else if (g_strcmp0 (method_name, "enableUpstream") == 0)
 	{
 		gboolean result = FALSE;
@@ -1308,6 +1331,162 @@ fail:
 	return FALSE;
 }
 
+static GstPadProbeReturn hls_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
+{
+	App *app = user_data;
+	DreamHLSserver *h = app->hls_server;
+
+	GstElement *element = gst_pad_get_parent_element(pad);
+
+	GST_DEBUG_OBJECT (pad, "unlink... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, h->hlssink);
+
+	GstPad *teepad;
+	teepad = gst_pad_get_peer(pad);
+	gst_pad_unlink (teepad, pad);
+
+	GstElement *tee = gst_pad_get_parent_element(teepad);
+	gst_element_release_request_pad (tee, teepad);
+	gst_object_unref (teepad);
+	gst_object_unref (tee);
+
+	gst_element_unlink (element, h->hlssink);
+
+	GST_DEBUG_OBJECT (pad, "remove... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, h->hlssink);
+
+	gst_bin_remove_many (GST_BIN (app->pipeline), element, h->hlssink, NULL);
+
+	GST_DEBUG_OBJECT (pad, "set state null %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, h->hlssink);
+
+	gst_element_set_state (h->hlssink, GST_STATE_NULL);
+	gst_element_set_state (element, GST_STATE_NULL);
+
+	GST_DEBUG_OBJECT (pad, "unref.... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, h->hlssink);
+
+	gst_object_unref (element);
+	gst_object_unref (h->hlssink);
+	h->queue = NULL;
+	h->hlssink = NULL;
+
+	if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->rtsp_server->state == RTSP_STATE_DISABLED)
+		halt_source_pipeline(app);
+	GST_INFO("HLS server disabled!");
+
+	return GST_PAD_PROBE_REMOVE;
+}
+
+gboolean disable_hls_server(App *app)
+{
+	GST_INFO_OBJECT(app, "disable_hls_server");
+	DreamHLSserver *h = app->hls_server;
+	if (h->state >= HLS_STATE_IDLE)
+	{
+		DREAMRTSPSERVER_LOCK (app);
+		h->state = HLS_STATE_DISABLED;
+		gst_object_ref (h->queue);
+		gst_object_ref (h->hlssink);
+		GstPad *sinkpad;
+		sinkpad = gst_element_get_static_pad (h->queue, "sink");
+		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, hls_pad_probe_unlink_cb, app, NULL);
+		gst_object_unref (sinkpad);
+		DREAMRTSPSERVER_UNLOCK (app);
+		GST_INFO("hls server disabled! set HLS_STATE_DISABLED");
+		return TRUE;
+	}
+	return FALSE;
+}
+
+gboolean enable_hls_server(App *app)
+{
+	GST_INFO_OBJECT(app, "enable_hls_server");
+	if (!app->pipeline)
+	{
+		GST_ERROR_OBJECT (app, "failed to enable hls server because source pipeline is NULL!");
+		return FALSE;
+	}
+	DreamHLSserver *h = app->hls_server;
+
+	if (h->state == HLS_STATE_DISABLED)
+	{
+		assert_tsmux (app);
+		DREAMRTSPSERVER_LOCK (app);
+
+		int r = mkdir (HLS_PATH, DEFFILEMODE);
+		if (r == -1 && errno != EEXIST)
+		{
+			g_error ("Failed to create HLS server directory '%s': %s (%i)", HLS_PATH, strerror(errno), errno);
+			goto fail;
+		}
+
+		h->queue = gst_element_factory_make ("queue", "hlsqueue");
+		h->hlssink = gst_element_factory_make ("hlssink", "hlssink");
+		if (!(h->hlssink && h->queue))
+		{
+			g_error ("Failed to create HLS pipeline element(s):%s%s", h->hlssink?"":" hlssink", h->queue?"":" queue");
+			goto fail;
+		}
+
+		gchar *frag_location, *playlist_location;
+		frag_location = g_strdup_printf ("%s/%s", HLS_PATH, HLS_FRAGMENT_NAME);
+		playlist_location = g_strdup_printf ("%s/%s", HLS_PATH, HLS_PLAYLIST_NAME);
+
+		g_object_set (G_OBJECT (h->hlssink), "target-duration", HLS_FRAGMENT_DURATION, NULL);
+		g_object_set (G_OBJECT (h->hlssink), "location", frag_location, NULL);
+		g_object_set (G_OBJECT (h->hlssink), "playlist-location", playlist_location, NULL);
+
+		gst_bin_add_many (GST_BIN (app->pipeline), h->queue, h->hlssink,  NULL);
+		gst_element_link (h->queue, h->hlssink);
+
+		GstPad *teepad, *sinkpad;
+		GstPadLinkReturn ret;
+		teepad = gst_element_get_request_pad (app->tstee, "src_%u");
+		sinkpad = gst_element_get_static_pad (h->queue, "sink");
+		ret = gst_pad_link (teepad, sinkpad);
+		if (ret != GST_PAD_LINK_OK)
+		{
+			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", teepad, sinkpad);
+			goto fail;
+		}
+		gst_object_unref (teepad);
+		gst_object_unref (sinkpad);
+
+		GstStateChangeReturn sret;
+		sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
+		if (sret == GST_STATE_CHANGE_FAILURE)
+		{
+			GST_ERROR_OBJECT (app, "state change failure for HLS server pipeline");
+			goto fail;
+		}
+		else if (sret == GST_STATE_CHANGE_ASYNC)
+		{
+			GstState state;
+			gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);
+			if (state != GST_STATE_NULL)
+				GST_INFO_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", app->pipeline, gst_element_state_get_name (state));
+		}
+
+		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_hls_server");
+
+		h->state = HLS_STATE_IDLE;
+		GST_DEBUG ("set HLS_STATE_IDLE");
+		DREAMRTSPSERVER_UNLOCK (app);
+		return TRUE;
+	}
+
+fail:
+	disable_hls_server(app);
+	return FALSE;
+
+}
+
+DreamHLSserver *create_hls_server(App *app)
+{
+	DreamHLSserver *h = malloc(sizeof(DreamHLSserver));
+	h->state = HLS_STATE_DISABLED;
+	h->queue = NULL;
+	h->hlssink = NULL;
+	return h;
+}
+
 DreamRTSPserver *create_rtsp_server(App *app)
 {
 	DreamRTSPserver *r = malloc(sizeof(DreamRTSPserver));
@@ -1330,11 +1509,11 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		return FALSE;
 	}
 
-	DREAMRTSPSERVER_LOCK (app);
 	DreamRTSPserver *r = app->rtsp_server;
 
 	if (r->state == RTSP_STATE_DISABLED)
 	{
+		DREAMRTSPSERVER_LOCK (app);
 		r->artspq = gst_element_factory_make ("queue", "rtspaudioqueue");
 		r->vrtspq = gst_element_factory_make ("queue", "rtspvideoqueue");
 		r->aappsink = gst_element_factory_make ("appsink", AAPPSINK);
@@ -1408,7 +1587,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		if (sret == GST_STATE_CHANGE_FAILURE)
 		{
 			GST_ERROR_OBJECT (app, "state change failure for local rtsp pipeline");
-			return FALSE;
+			goto fail;
 		}
 
 		r->server = g_object_new (GST_TYPE_DREAM_RTSP_SERVER, NULL);
@@ -1476,7 +1655,6 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 	}
 	else
 		GST_INFO_OBJECT (app, "rtsp server already enabled!");
-	DREAMRTSPSERVER_UNLOCK (app);
 	return FALSE;
 
 fail:
@@ -1675,7 +1853,6 @@ GstRTSPFilterResult remove_client_filter_func (GstRTSPServer *server, GstRTSPCli
 	g_list_free (session_filter_res);
 	return res;
 }
-
 
 static GstPadProbeReturn rtsp_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
 {
@@ -1921,6 +2098,8 @@ int main (int argc, char *argv[])
 	app.tcp_upstream->state = UPSTREAM_STATE_DISABLED;
 	app.tcp_upstream->auto_bitrate = AUTO_BITRATE;
 
+	app.hls_server = create_hls_server(&app);
+
 	app.rtsp_server = create_rtsp_server(&app);
 
 	app.loop = g_main_loop_new (NULL, FALSE);
@@ -1936,6 +2115,10 @@ int main (int argc, char *argv[])
 	if (app.rtsp_server->clients_list)
 		g_list_free (app.rtsp_server->clients_list);
 	free(app.rtsp_server);
+
+	if (app.hls_server->state >= HLS_STATE_IDLE)
+		disable_hls_server(&app);
+	free(app.hls_server);
 
 	destroy_pipeline(&app);
 
