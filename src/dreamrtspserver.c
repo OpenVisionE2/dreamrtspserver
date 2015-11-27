@@ -431,7 +431,7 @@ static void handle_method_call (GDBusConnection       *connection,
 		}
 		g_dbus_method_invocation_return_value (invocation,  g_variant_new ("(b)", result));
 	}
-	if (g_strcmp0 (method_name, "enableHLS") == 0)
+	else if (g_strcmp0 (method_name, "enableHLS") == 0)
 	{
 		gboolean result = FALSE;
 		if (app->pipeline)
@@ -1403,12 +1403,13 @@ gboolean enable_hls_server(App *app)
 		GST_ERROR_OBJECT (app, "failed to enable hls server because source pipeline is NULL!");
 		return FALSE;
 	}
+
+	DREAMRTSPSERVER_LOCK (app);
 	DreamHLSserver *h = app->hls_server;
 
 	if (h->state == HLS_STATE_DISABLED)
 	{
 		assert_tsmux (app);
-		DREAMRTSPSERVER_LOCK (app);
 
 		int r = mkdir (HLS_PATH, DEFFILEMODE);
 		if (r == -1 && errno != EEXIST)
@@ -1432,6 +1433,7 @@ gboolean enable_hls_server(App *app)
 		g_object_set (G_OBJECT (h->hlssink), "target-duration", HLS_FRAGMENT_DURATION, NULL);
 		g_object_set (G_OBJECT (h->hlssink), "location", frag_location, NULL);
 		g_object_set (G_OBJECT (h->hlssink), "playlist-location", playlist_location, NULL);
+		g_object_set (G_OBJECT (h->queue), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 
 		gst_bin_add_many (GST_BIN (app->pipeline), h->queue, h->hlssink,  NULL);
 		gst_element_link (h->queue, h->hlssink);
@@ -1471,8 +1473,13 @@ gboolean enable_hls_server(App *app)
 		DREAMRTSPSERVER_UNLOCK (app);
 		return TRUE;
 	}
+	else
+		GST_INFO_OBJECT (app, "HLS server already enabled!");
+	DREAMRTSPSERVER_UNLOCK (app);
+	return FALSE;
 
 fail:
+	DREAMRTSPSERVER_UNLOCK (app);
 	disable_hls_server(app);
 	return FALSE;
 
@@ -1509,11 +1516,11 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		return FALSE;
 	}
 
+	DREAMRTSPSERVER_LOCK (app);
 	DreamRTSPserver *r = app->rtsp_server;
 
 	if (r->state == RTSP_STATE_DISABLED)
 	{
-		DREAMRTSPSERVER_LOCK (app);
 		r->artspq = gst_element_factory_make ("queue", "rtspaudioqueue");
 		r->vrtspq = gst_element_factory_make ("queue", "rtspvideoqueue");
 		r->aappsink = gst_element_factory_make ("appsink", AAPPSINK);
@@ -1579,7 +1586,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		gst_object_unref (sinkpad);
 
 		GstStateChangeReturn sret;
-		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
+		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->hls_server->state == HLS_STATE_DISABLED)
 			sret = gst_element_set_state (app->pipeline, GST_STATE_READY);
 		else
 			sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
@@ -1655,9 +1662,11 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 	}
 	else
 		GST_INFO_OBJECT (app, "rtsp server already enabled!");
+	DREAMRTSPSERVER_UNLOCK (app);
 	return FALSE;
 
 fail:
+	DREAMRTSPSERVER_UNLOCK (app);
 	disable_rtsp_server(app);
 	return FALSE;
 }
