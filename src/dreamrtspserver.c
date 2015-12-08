@@ -1369,7 +1369,7 @@ static GstPadProbeReturn hls_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo 
 
 	if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->rtsp_server->state == RTSP_STATE_DISABLED)
 		halt_source_pipeline(app);
-	GST_INFO("HLS server disabled!");
+	GST_INFO ("HLS server disabled!");
 
 	return GST_PAD_PROBE_REMOVE;
 }
@@ -1787,7 +1787,6 @@ gboolean halt_source_pipeline(App* app)
 {
 	GST_INFO_OBJECT(app, "halt_source_pipeline...");
 	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"halt_source_pipeline_pre");
-	DREAMRTSPSERVER_LOCK (app);
 	GstPad *sinkpad;
 	gst_object_ref (app->aq);
 	sinkpad = gst_element_get_static_pad (app->aq, "sink");
@@ -2118,16 +2117,17 @@ int main (int argc, char *argv[])
 
 	if (app.tcp_upstream->state > UPSTREAM_STATE_DISABLED)
 		disable_tcp_upstream(&app);
-	free(app.tcp_upstream);
 	if (app.rtsp_server->state >= RTSP_STATE_IDLE)
 		disable_rtsp_server(&app);
 	if (app.rtsp_server->clients_list)
 		g_list_free (app.rtsp_server->clients_list);
-	free(app.rtsp_server);
 
 	if (app.hls_server->state >= HLS_STATE_IDLE)
 		disable_hls_server(&app);
+
 	free(app.hls_server);
+	free(app.rtsp_server);
+	free(app.tcp_upstream);
 
 	destroy_pipeline(&app);
 

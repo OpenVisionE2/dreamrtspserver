@@ -38,7 +38,7 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 #define RTSP_ES_PATH_SUFX "-es"
 
 #define HLS_PATH "/tmp/hls"
-#define HLS_FRAGMENT_DURATION 10
+#define HLS_FRAGMENT_DURATION 2
 #define HLS_FRAGMENT_NAME "segment%05d.ts"
 #define HLS_PLAYLIST_NAME "dream.m3u8"
 
