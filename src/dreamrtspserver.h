@@ -286,6 +286,8 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 gboolean disable_rtsp_server(App *app);
 gboolean start_rtsp_pipeline(App *app);
 
+static void encoder_signal_lost(GstElement *, gpointer user_data);
+
 G_END_DECLS
 
 #endif /* __DREAMRTSPSERVER_H__ */

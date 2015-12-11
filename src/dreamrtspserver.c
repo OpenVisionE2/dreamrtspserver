@@ -1168,12 +1168,20 @@ gboolean create_source_pipeline(App *app)
 
 	app->clock = gst_system_clock_obtain();
 	gst_pipeline_use_clock(GST_PIPELINE (app->pipeline), app->clock);
-	
+
 	apply_source_properties(app);
+
+	g_signal_connect (app->asrc, "signal-lost", G_CALLBACK (encoder_signal_lost), app);
 
 	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"create_source_pipeline");
 	DREAMRTSPSERVER_UNLOCK (app);
 	return TRUE;
+}
+
+static void encoder_signal_lost (GstElement *dreamaudiosource, gpointer user_data)
+{
+	App *app = user_data;
+	GST_INFO_OBJECT (dreamaudiosource, "lost encoder signal!");
 }
 
 static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
@@ -1214,7 +1222,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		t->state = UPSTREAM_STATE_CONNECTING;
 		send_signal (app, "upstreamStateChanged", g_variant_new("(i)", t->state));
 
-		t->tstcpq   = gst_element_factory_make ("queue", "tstcpqueue");
+		t->tstcpq  = gst_element_factory_make ("queue", "tstcpqueue");
 		t->tcpsink = gst_element_factory_make ("tcpclientsink", NULL);
 
 		if (!(t->tstcpq && t->tcpsink ))
