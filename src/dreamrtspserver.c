@@ -1757,7 +1757,7 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 	gst_element_set_state (element, GST_STATE_READY);
 
 	GstState state;
-	gst_element_get_state (GST_ELEMENT(element), &state, NULL, 1*GST_USECOND);
+	gst_element_get_state (GST_ELEMENT(element), &state, NULL, 2*GST_SECOND);
 
 	if (state != GST_STATE_READY)
 	{
@@ -2026,7 +2026,9 @@ static GstPadProbeReturn upstream_pad_probe_unlink_cb (GstPad * pad, GstPadProbe
 
 gboolean disable_tcp_upstream(App *app)
 {
-	GST_DEBUG("disable_tcp_upstream");
+	GstState state;
+	gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);
+	GST_DEBUG("disable_tcp_upstream (current pipeline state=%s)", gst_element_state_get_name (state));
 	DreamTCPupstream *t = app->tcp_upstream;
 	if (t->state >= UPSTREAM_STATE_CONNECTING)
 	{
