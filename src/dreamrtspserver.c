@@ -1089,7 +1089,7 @@ gboolean create_source_pipeline(App *app)
 
 	app->aparse = gst_element_factory_make ("aacparse", NULL);
 	app->vparse = gst_element_factory_make ("h264parse", NULL);
-	
+
 	app->atee = gst_element_factory_make ("tee", "atee");
 	app->vtee = gst_element_factory_make ("tee", "vtee");
 	app->tstee = gst_element_factory_make ("tee", "tstee");
@@ -1281,7 +1281,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", srcpad, sinkpad);
 			goto fail;
 		}
-		
+
 		if (!gst_element_link (t->tstcpq, t->tcpsink)) {
 			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", t->tstcpq, t->tcpsink);
 			goto fail;
@@ -1446,6 +1446,31 @@ gboolean enable_hls_server(App *app)
 		gst_bin_add_many (GST_BIN (app->pipeline), h->queue, h->hlssink,  NULL);
 		gst_element_link (h->queue, h->hlssink);
 
+		GstStateChangeReturn sret;
+		GstState state;
+		sret = gst_element_set_state (h->hlssink, GST_STATE_PLAYING);
+		if (sret == GST_STATE_CHANGE_FAILURE)
+		{
+			GST_ERROR_OBJECT (app, "state change failure for h->hlssink");
+			goto fail;
+		}
+		else if (sret == GST_STATE_CHANGE_ASYNC)
+		{
+			gst_element_get_state (GST_ELEMENT(h->hlssink), &state, NULL, 3*GST_SECOND);
+			if (state <= GST_STATE_NULL)
+			{
+				GST_ERROR_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", h->hlssink, gst_element_state_get_name (state));
+				goto fail;
+			}
+		}
+
+		sret = gst_element_set_state (h->queue, GST_STATE_PLAYING);
+		if (sret != GST_STATE_CHANGE_SUCCESS)
+		{
+			GST_ERROR_OBJECT (app, "state change for h->queue not successful! returned %i", sret);
+			goto fail;
+		}
+
 		GstPad *teepad, *sinkpad;
 		GstPadLinkReturn ret;
 		teepad = gst_element_get_request_pad (app->tstee, "src_%u");
@@ -1459,7 +1484,6 @@ gboolean enable_hls_server(App *app)
 		gst_object_unref (teepad);
 		gst_object_unref (sinkpad);
 
-		GstStateChangeReturn sret;
 		sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
 		if (sret == GST_STATE_CHANGE_FAILURE)
 		{
@@ -1468,14 +1492,12 @@ gboolean enable_hls_server(App *app)
 		}
 		else if (sret == GST_STATE_CHANGE_ASYNC)
 		{
-			GstState state;
 			gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);
-			if (state != GST_STATE_NULL)
+			if (state <= GST_STATE_NULL)
 				GST_INFO_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", app->pipeline, gst_element_state_get_name (state));
 		}
 
 		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_hls_server");
-
 		h->state = HLS_STATE_IDLE;
 		GST_DEBUG ("set HLS_STATE_IDLE");
 		DREAMRTSPSERVER_UNLOCK (app);
@@ -1982,9 +2004,9 @@ static GstPadProbeReturn upstream_pad_probe_unlink_cb (GstPad * pad, GstPadProbe
 	GstPadProbeReturn ret;
 
 	GstElement *element = gst_pad_get_parent_element(pad);
-	
+
 	GST_DEBUG_OBJECT (pad, "upstream_pad_probe_unlink_cb %" GST_PTR_FORMAT, element);
-	
+
 	if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_IDLE && element && element == t->tstcpq)
 	{
 		GstPad *teepad;
