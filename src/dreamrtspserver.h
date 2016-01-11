@@ -65,6 +65,8 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 
 #define AUTO_BITRATE TRUE
 
+#define WATCHDOG_TIMEOUT 5
+
 #if HAVE_UPSTREAM
 	#pragma message("building with mediator upstream feature")
 #else
@@ -183,6 +185,7 @@ static GDBusNodeInfo *introspection_data = NULL;
 static const gchar introspection_xml[] =
   "<node>"
   "  <interface name='com.dreambox.RTSPserver'>"
+  "    <signal name='ping' />"
   "    <signal name='sourceStateChanged'>"
   "      <arg type='i' name='state' direction='out'/>"
   "    </signal>"
@@ -272,6 +275,7 @@ gboolean halt_source_pipeline(App *app);
 gboolean pause_source_pipeline(App *app);
 gboolean unpause_source_pipeline(App *app);
 gboolean destroy_pipeline(App *app);
+gboolean watchdog_ping(gpointer user_data);
 gboolean quit_signal(gpointer loop);
 
 DreamHLSserver *create_hls_server(App *app);

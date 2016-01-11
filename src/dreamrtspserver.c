@@ -2097,6 +2097,15 @@ gboolean destroy_pipeline(App *app)
 	return FALSE;
 }
 
+gboolean watchdog_ping(gpointer user_data)
+{
+	App *app = user_data;
+	GST_TRACE_OBJECT(app, "sending watchdog ping!");
+	if (app->dbus_connection)
+		g_dbus_connection_emit_signal (app->dbus_connection, NULL, object_name, service, "ping", NULL, NULL);
+	return TRUE;
+}
+
 gboolean quit_signal(gpointer loop)
 {
 	GST_INFO_OBJECT(loop, "caught SIGINT");
@@ -2133,6 +2142,10 @@ int main (int argc, char *argv[])
 
 	if (!create_source_pipeline(&app))
 		g_print ("Failed to create source pipeline!");
+
+#if WATCHDOG_TIMEOUT > 0
+	g_timeout_add_seconds (WATCHDOG_TIMEOUT, watchdog_ping, &app);
+#endif
 
 	app.tcp_upstream = malloc(sizeof(DreamTCPupstream));
 	app.tcp_upstream->state = UPSTREAM_STATE_DISABLED;
