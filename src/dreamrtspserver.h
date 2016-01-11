@@ -1,6 +1,6 @@
 /*
  * GStreamer dreamrtspserver
- * Copyright 2015 Andreas Frisch <fraxinas@opendreambox.org>
+ * Copyright 2015-2016 Andreas Frisch <fraxinas@opendreambox.org>
  *
  * This program is licensed under the Creative Commons
  * Attribution-NonCommercial-ShareAlike 3.0 Unported
@@ -28,6 +28,7 @@
 #include <gst/gst.h>
 #include <gst/app/app.h>
 #include <gst/rtsp-server/rtsp-server.h>
+#include <libsoup/soup.h>
 #include "gstdreamrtsp.h"
 
 GST_DEBUG_CATEGORY (dreamrtspserver_debug);
@@ -160,6 +161,8 @@ typedef struct {
 	GstElement *queue;
 	GstElement *hlssink;
 	hlsState state;
+	SoupServer *soupserver;
+	guint port;
 } DreamHLSserver;
 
 typedef struct {
@@ -202,6 +205,7 @@ static const gchar introspection_xml[] =
   "    </method>"
   "    <method name='enableHLS'>"
   "      <arg type='b' name='state' direction='in'/>"
+  "      <arg type='u' name='port' direction='in'/>"
   "      <arg type='b' name='result' direction='out'/>"
   "    </method>"
 #if HAVE_UPSTREAM
@@ -279,8 +283,11 @@ gboolean watchdog_ping(gpointer user_data);
 gboolean quit_signal(gpointer loop);
 
 DreamHLSserver *create_hls_server(App *app);
-gboolean enable_hls_server(App *app);
+gboolean enable_hls_server(App *app, guint port);
 gboolean disable_hls_server(App *app);
+
+static void soup_do_get (SoupServer *server, SoupMessage *msg, const char *path);
+static void soup_server_callback (SoupServer *server, SoupMessage *msg, const char *path, GHashTable *query, SoupClientContext *context, gpointer data);
 
 gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstream_port, const gchar *token);
 gboolean disable_tcp_upstream(App *app);

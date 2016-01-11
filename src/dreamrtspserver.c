@@ -1,6 +1,6 @@
 /*
  * GStreamer dreamrtspserver
- * Copyright 2015 Andreas Frisch <fraxinas@opendreambox.org>
+ * Copyright 2015-2016 Andreas Frisch <fraxinas@opendreambox.org>
  *
  * This program is licensed under the Creative Commons
  * Attribution-NonCommercial-ShareAlike 3.0 Unported
@@ -437,11 +437,12 @@ static void handle_method_call (GDBusConnection       *connection,
 		if (app->pipeline)
 		{
 			gboolean state;
-			g_variant_get (parameters, "(b)", &state);
-			GST_DEBUG("app->pipeline=%p, enableHLS state=%i", app->pipeline, state);
+			guint32 port;
+			g_variant_get (parameters, "(bu)", &state, &port);
+			GST_DEBUG("app->pipeline=%p, enableHLS state=%i port=%i", app->pipeline, state, port);
 
 			if (state == TRUE && app->hls_server->state >= HLS_STATE_DISABLED)
-				result = enable_hls_server(app);
+				result = enable_hls_server(app, port);
 			else if (state == FALSE && app->hls_server->state >= HLS_STATE_IDLE)
                         {
 				result = disable_hls_server(app);
@@ -1339,6 +1340,82 @@ fail:
 	return FALSE;
 }
 
+static void
+soup_do_get (SoupServer *server, SoupMessage *msg, const char *path)
+{
+	char *slash;
+	gchar *hlspath = NULL;
+	guint status_code = SOUP_STATUS_NONE;
+	struct stat st;
+
+	if (path)
+	{
+		if (strlen(path) < 1)
+			status_code = SOUP_STATUS_BAD_REQUEST;
+		if (strlen(path) == 1)
+			hlspath = g_strdup_printf ("%s/%s", HLS_PATH, HLS_PLAYLIST_NAME);
+		else
+			hlspath = g_strdup_printf ("%s%s", HLS_PATH, path);
+	}
+
+	if (status_code == SOUP_STATUS_NONE && stat (hlspath, &st) == -1) {
+		if (errno == EPERM)
+			status_code = SOUP_STATUS_FORBIDDEN;
+		else if (errno == ENOENT)
+			status_code = SOUP_STATUS_NOT_FOUND;
+		else
+			status_code = SOUP_STATUS_INTERNAL_SERVER_ERROR;
+	}
+	else if (S_ISDIR (st.st_mode))
+		status_code = SOUP_STATUS_SERVICE_UNAVAILABLE;
+
+	if (status_code != SOUP_STATUS_NONE)
+	{
+		GST_WARNING_OBJECT (server, "client requested '%s', error serving '%s', http status code %i", path, hlspath ? hlspath : "", status_code);
+		g_free (hlspath);
+		soup_message_set_status (msg, status_code);
+		return;
+	}
+
+	GST_INFO_OBJECT (server, "client requests '%s', serving '%s'...", path, hlspath);
+
+	if (msg->method == SOUP_METHOD_GET) {
+		GMappedFile *mapping;
+		SoupBuffer *buffer;
+
+		mapping = g_mapped_file_new (hlspath, FALSE, NULL);
+		if (!mapping) {
+			soup_message_set_status (msg, SOUP_STATUS_INTERNAL_SERVER_ERROR);
+			return;
+		}
+
+		buffer = soup_buffer_new_with_owner (g_mapped_file_get_contents (mapping),
+						     g_mapped_file_get_length (mapping),
+						     mapping, (GDestroyNotify)g_mapped_file_unref);
+		soup_message_body_append_buffer (msg->response_body, buffer);
+		soup_buffer_free (buffer);
+	} else /* msg->method == SOUP_METHOD_HEAD */ {
+		char *length;
+		length = g_strdup_printf ("%lu", (gulong)st.st_size);
+		soup_message_headers_append (msg->response_headers, "Content-Length", length);
+		g_free (length);
+	}
+
+	g_free (hlspath);
+	soup_message_set_status (msg, SOUP_STATUS_OK);
+}
+
+static void
+soup_server_callback (SoupServer *server, SoupMessage *msg, const char *path, GHashTable *query, SoupClientContext *context, gpointer data)
+{
+	GST_TRACE_OBJECT (server, "%s %s HTTP/1.%d", msg->method, path, soup_message_get_http_version (msg));
+	if (msg->method == SOUP_METHOD_GET)
+		soup_do_get (server, msg, path);
+	else
+		soup_message_set_status (msg, SOUP_STATUS_NOT_IMPLEMENTED);
+	GST_TRACE_OBJECT (server, "  -> %d %s", msg->status_code, msg->reason_phrase);
+}
+
 static GstPadProbeReturn hls_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
 {
 	App *app = user_data;
@@ -1396,14 +1473,16 @@ gboolean disable_hls_server(App *app)
 		sinkpad = gst_element_get_static_pad (h->queue, "sink");
 		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, hls_pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);
+		soup_server_quit (h->soupserver);
+		g_object_unref (h->soupserver);
 		DREAMRTSPSERVER_UNLOCK (app);
-		GST_INFO("hls server disabled! set HLS_STATE_DISABLED");
+		GST_INFO("hls server disabled, soupserver unref'ed, set HLS_STATE_DISABLED");
 		return TRUE;
 	}
 	return FALSE;
 }
 
-gboolean enable_hls_server(App *app)
+gboolean enable_hls_server(App *app, guint port)
 {
 	GST_INFO_OBJECT(app, "enable_hls_server");
 	if (!app->pipeline)
@@ -1496,8 +1575,14 @@ gboolean enable_hls_server(App *app)
 			if (state <= GST_STATE_NULL)
 				GST_INFO_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", app->pipeline, gst_element_state_get_name (state));
 		}
-
 		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_hls_server");
+
+		h->port = port;
+		h->soupserver = soup_server_new (SOUP_SERVER_PORT, h->port, SOUP_SERVER_SERVER_HEADER, "dreamhttplive", NULL);
+		soup_server_add_handler (h->soupserver, NULL, soup_server_callback, NULL, NULL);
+		soup_server_run_async (h->soupserver);
+		GST_INFO_OBJECT (h->soupserver, "Soup server listening on port %i for http requests...", soup_server_get_port ((h->soupserver)));
+
 		h->state = HLS_STATE_IDLE;
 		GST_DEBUG ("set HLS_STATE_IDLE");
 		DREAMRTSPSERVER_UNLOCK (app);

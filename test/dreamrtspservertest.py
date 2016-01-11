@@ -36,8 +36,8 @@ class StreamServerControl(object):
 		self._proxy = self._bus.get_object(self.INTERFACE, self.OBJECT)
 		self._interface = dbus.Interface(self._proxy, self.INTERFACE)
 
-	def enableHLS(self, state):
-		return self._interface.enableHLS(state)
+	def enableHLS(self, state, port=0):
+		return self._interface.enableHLS(state, port)
 
 	def enableRTSP(self, state, path='', port=0, user='', pw=''):
 		return self._interface.enableRTSP(state, path, port, user, pw)

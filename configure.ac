@@ -20,6 +20,11 @@ AC_CHECK_HEADERS([stdio.h stdlib.h fcntl.h string.h getopt.h byteswap.h netinet/
 # Checks for typedefs, structures, and compiler characteristics.
 AC_TYPE_SIZE_T
 
+# Check for libsoup
+PKG_CHECK_MODULES(LIBSOUP, [libsoup-2.4 >= 2.42])
+AC_SUBST(LIBSOUP_CFLAGS)
+AC_SUBST(LIBSOUP_LIBS)
+
 # Check for Gstreamer 1.0
 PKG_CHECK_MODULES(GST, [gstreamer-1.0], [])
 PKG_CHECK_MODULES(GSTRTSP, [gstreamer-rtsp-1.0], [])
