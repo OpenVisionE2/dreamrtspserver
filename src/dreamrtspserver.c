@@ -1353,7 +1353,7 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path)
 		if (strlen(path) < 1)
 			status_code = SOUP_STATUS_BAD_REQUEST;
 		if (strlen(path) == 1)
-			hlspath = g_strdup_printf ("%s/%s", HLS_PATH, HLS_PLAYLIST_NAME);
+			status_code = SOUP_STATUS_MOVED_PERMANENTLY;
 		else
 			hlspath = g_strdup_printf ("%s%s", HLS_PATH, path);
 	}
@@ -1369,7 +1369,13 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path)
 	else if (S_ISDIR (st.st_mode))
 		status_code = SOUP_STATUS_SERVICE_UNAVAILABLE;
 
-	if (status_code != SOUP_STATUS_NONE)
+	if (status_code == SOUP_STATUS_MOVED_PERMANENTLY)
+	{
+		GST_WARNING_OBJECT (server, "client requested /, redirect to %s", HLS_PLAYLIST_NAME);
+		soup_message_set_redirect (msg, status_code, HLS_PLAYLIST_NAME);
+		return;
+	}
+	else if (status_code != SOUP_STATUS_NONE)
 	{
 		GST_WARNING_OBJECT (server, "client requested '%s', error serving '%s', http status code %i", path, hlspath ? hlspath : "", status_code);
 		g_free (hlspath);
