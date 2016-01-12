@@ -1389,6 +1389,11 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path)
 			return;
 		}
 
+		if (g_strrstr (hlspath, ".ts"))
+			soup_message_headers_append (msg->response_headers, "Content-Type", "video/MP2T");
+		else
+			soup_message_headers_append (msg->response_headers, "Content-Type", "application/x-mpegURL");
+
 		buffer = soup_buffer_new_with_owner (g_mapped_file_get_contents (mapping),
 						     g_mapped_file_get_length (mapping),
 						     mapping, (GDestroyNotify)g_mapped_file_unref);
