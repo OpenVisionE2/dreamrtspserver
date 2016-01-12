@@ -1371,7 +1371,7 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path)
 
 	if (status_code == SOUP_STATUS_MOVED_PERMANENTLY)
 	{
-		GST_WARNING_OBJECT (server, "client requested /, redirect to %s", HLS_PLAYLIST_NAME);
+		GST_LOG_OBJECT (server, "client requested /, redirect to %s", HLS_PLAYLIST_NAME);
 		soup_message_set_redirect (msg, status_code, HLS_PLAYLIST_NAME);
 		return;
 	}
@@ -1396,22 +1396,16 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path)
 		}
 
 		if (g_strrstr (hlspath, ".ts"))
-			soup_message_headers_append (msg->response_headers, "Content-Type", "video/MP2T");
+			soup_message_headers_set_content_type (msg->response_headers, "video/MP2T", NULL);
 		else
-			soup_message_headers_append (msg->response_headers, "Content-Type", "application/x-mpegURL");
+			soup_message_headers_set_content_type (msg->response_headers, "application/x-mpegURL", NULL);
 
 		buffer = soup_buffer_new_with_owner (g_mapped_file_get_contents (mapping),
 						     g_mapped_file_get_length (mapping),
 						     mapping, (GDestroyNotify)g_mapped_file_unref);
 		soup_message_body_append_buffer (msg->response_body, buffer);
 		soup_buffer_free (buffer);
-	} else /* msg->method == SOUP_METHOD_HEAD */ {
-		char *length;
-		length = g_strdup_printf ("%lu", (gulong)st.st_size);
-		soup_message_headers_append (msg->response_headers, "Content-Length", length);
-		g_free (length);
 	}
-
 	g_free (hlspath);
 	soup_message_set_status (msg, SOUP_STATUS_OK);
 }
