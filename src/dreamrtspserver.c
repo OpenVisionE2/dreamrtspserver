@@ -1041,6 +1041,65 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 	return GST_FLOW_OK;
 }
 
+gboolean assert_state(App *app, GstElement *element, GstState state)
+{
+	GstStateChangeReturn sret;
+	GST_DEBUG_OBJECT(app, "setting %" GST_PTR_FORMAT"'s state to %s", element, gst_element_state_get_name (state));
+	sret = gst_element_set_state (element, state);
+	switch (sret) {
+		case GST_STATE_CHANGE_SUCCESS:
+		{
+			GST_DEBUG_OBJECT(app, "GST_STATE_CHANGE_SUCCESS on setting %" GST_PTR_FORMAT"'s state to %s ", element, gst_element_state_get_name (state));
+			return TRUE;
+		}
+		case GST_STATE_CHANGE_FAILURE:
+		{
+			GST_ERROR_OBJECT (app, "GST_STATE_CHANGE_FAILURE when trying to change %" GST_PTR_FORMAT"'s state to %s", element, gst_element_state_get_name (state));
+			return FALSE;
+		}
+		case GST_STATE_CHANGE_ASYNC:
+		{
+			gboolean fail = FALSE;
+			GstState pipeline_state, current_state;
+			GST_TRACE_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"", element);
+			GstClockTime timeout = (element == app->pipeline) ? 4*GST_SECOND : GST_MSECOND;
+			gst_element_get_state (GST_ELEMENT(app->pipeline), &pipeline_state, NULL, timeout);
+			GST_TRACE_OBJECT(app, "GST_STATE_CHANGE_ASYNC got pipeline_state=%s", gst_element_state_get_name (state));
+			if (pipeline_state != state)
+			{
+				GValue item = G_VALUE_INIT;
+				GstIterator* iter = gst_bin_iterate_elements(GST_BIN(app->pipeline));
+				while (GST_ITERATOR_OK == gst_iterator_next(iter, (GValue*)&item))
+				{
+					GstElement *elem = g_value_get_object(&item);
+					gst_element_get_state (elem, &current_state, NULL, GST_MSECOND);
+					if (current_state != state && (element == app->pipeline || element == elem))
+					{
+						GST_WARNING_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (current_state));
+						if (element == app->pipeline)
+							fail = TRUE;
+					}
+					else
+						GST_TRACE_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (current_state));
+				}
+				gst_iterator_free(iter);
+				if (fail)
+				{
+					GST_ERROR_OBJECT (app, "pipeline didn't complete GST_STATE_CHANGE_ASYNC to %s within %" GST_TIME_FORMAT ", currently in %s", GST_TIME_ARGS(timeout), gst_element_state_get_name (state), gst_element_state_get_name (pipeline_state));
+					return FALSE;
+				}
+			}
+			return TRUE;
+		}
+		case GST_STATE_CHANGE_NO_PREROLL:
+			GST_WARNING_OBJECT(app, "GST_STATE_CHANGE_NO_PREROLL on setting %" GST_PTR_FORMAT"'s state to %s ", element, gst_element_state_get_name (state));
+			break;
+		default:
+			break;
+	}
+	return TRUE;
+}
+
 void assert_tsmux(App *app)
 {
 	if (app->tsmux)
@@ -1269,6 +1328,13 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		}
 
 		gst_bin_add_many (GST_BIN(app->pipeline), t->tstcpq, t->tcpsink, NULL);
+		if (!gst_element_link (t->tstcpq, t->tcpsink)) {
+			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", t->tstcpq, t->tcpsink);
+			goto fail;
+		}
+
+		if (!assert_state (app, t->tcpsink, GST_STATE_PLAYING) || !assert_state (app, t->tstcpq, GST_STATE_PLAYING))
+			goto fail;
 
 		GstPadLinkReturn ret;
 		GstPad *srcpad, *sinkpad;
@@ -1283,11 +1349,6 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			goto fail;
 		}
 
-		if (!gst_element_link (t->tstcpq, t->tcpsink)) {
-			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", t->tstcpq, t->tcpsink);
-			goto fail;
-		}
-
 		if (strlen(token))
 		{
 			sinkpad = gst_element_get_static_pad (t->tcpsink, "sink");
@@ -1297,35 +1358,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		}
 		else
 			GST_DEBUG_OBJECT (app, "no token specified!");
-		sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
-		GST_DEBUG_OBJECT(app, "gst_element_set_state (app->pipeline, GST_STATE_PLAYING) = %i", sret);
 
-		if (sret == GST_STATE_CHANGE_FAILURE)
-		{
-			GST_ERROR_OBJECT (app, "GST_STATE_CHANGE_FAILURE for upstream pipeline");
-			goto fail;
-		}
-		else if (sret == GST_STATE_CHANGE_ASYNC)
-		{
-			GstState state;
-                        gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);
-			GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_tcp_upstream");
-			GValue item = G_VALUE_INIT;
-				GstIterator* iter = gst_bin_iterate_elements(GST_BIN(app->pipeline));
-				while (GST_ITERATOR_OK == gst_iterator_next(iter, (GValue*)&item))
-				{
-					GstElement *elem = g_value_get_object(&item);
-					gst_element_get_state (elem, &state, NULL, GST_USECOND);
-					if ( state != GST_STATE_PLAYING)
-						GST_DEBUG_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (state));
-				}
-				gst_iterator_free(iter);
-			if (state != GST_STATE_PLAYING)
-			{
-				GST_ERROR_OBJECT (app, "state != GST_STATE_PLAYING");
-				goto fail;
-			}
-		}
 		GST_INFO_OBJECT(app, "enabled TCP upstream! upstreamState = UPSTREAM_STATE_CONNECTING");
 		DREAMRTSPSERVER_UNLOCK (app);
 		return TRUE;
@@ -1530,30 +1563,8 @@ gboolean enable_hls_server(App *app, guint port)
 		gst_bin_add_many (GST_BIN (app->pipeline), h->queue, h->hlssink,  NULL);
 		gst_element_link (h->queue, h->hlssink);
 
-		GstStateChangeReturn sret;
-		GstState state;
-		sret = gst_element_set_state (h->hlssink, GST_STATE_PLAYING);
-		if (sret == GST_STATE_CHANGE_FAILURE)
-		{
-			GST_ERROR_OBJECT (app, "state change failure for h->hlssink");
+		if (!assert_state (app, h->hlssink, GST_STATE_PLAYING) || !assert_state (app, h->queue, GST_STATE_PLAYING))
 			goto fail;
-		}
-		else if (sret == GST_STATE_CHANGE_ASYNC)
-		{
-			gst_element_get_state (GST_ELEMENT(h->hlssink), &state, NULL, 3*GST_SECOND);
-			if (state <= GST_STATE_NULL)
-			{
-				GST_ERROR_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", h->hlssink, gst_element_state_get_name (state));
-				goto fail;
-			}
-		}
-
-		sret = gst_element_set_state (h->queue, GST_STATE_PLAYING);
-		if (sret != GST_STATE_CHANGE_SUCCESS)
-		{
-			GST_ERROR_OBJECT (app, "state change for h->queue not successful! returned %i", sret);
-			goto fail;
-		}
 
 		GstPad *teepad, *sinkpad;
 		GstPadLinkReturn ret;
@@ -1568,19 +1579,8 @@ gboolean enable_hls_server(App *app, guint port)
 		gst_object_unref (teepad);
 		gst_object_unref (sinkpad);
 
-		sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
-		if (sret == GST_STATE_CHANGE_FAILURE)
-		{
-			GST_ERROR_OBJECT (app, "state change failure for HLS server pipeline");
+		if (!assert_state (app, app->pipeline, GST_STATE_PLAYING))
 			goto fail;
-		}
-		else if (sret == GST_STATE_CHANGE_ASYNC)
-		{
-			gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, 3*GST_SECOND);
-			if (state <= GST_STATE_NULL)
-				GST_INFO_OBJECT(app, "%" GST_PTR_FORMAT"'s state=%s", app->pipeline, gst_element_state_get_name (state));
-		}
-		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_hls_server");
 
 		h->port = port;
 		h->soupserver = soup_server_new (SOUP_SERVER_PORT, h->port, SOUP_SERVER_SERVER_HEADER, "dreamhttplive", NULL);
@@ -1591,6 +1591,7 @@ gboolean enable_hls_server(App *app, guint port)
 		h->state = HLS_STATE_IDLE;
 		GST_DEBUG ("set HLS_STATE_IDLE");
 		DREAMRTSPSERVER_UNLOCK (app);
+		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_hls_server");
 		return TRUE;
 	}
 	else
@@ -1646,10 +1647,6 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		r->aappsink = gst_element_factory_make ("appsink", AAPPSINK);
 		r->vappsink = gst_element_factory_make ("appsink", VAPPSINK);
 
-		gst_bin_add_many (GST_BIN (app->pipeline), r->artspq, r->vrtspq, r->aappsink, r->vappsink,  NULL);
-		gst_element_link (r->artspq, r->aappsink);
-		gst_element_link (r->vrtspq, r->vappsink);
-
 		g_object_set (G_OBJECT (r->artspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 		g_object_set (G_OBJECT (r->vrtspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 
@@ -1663,14 +1660,31 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 
 		r->tsrtspq = gst_element_factory_make ("queue", "tsrtspqueue");
 		r->tsappsink = gst_element_factory_make ("appsink", TSAPPSINK);
-		gst_bin_add_many (GST_BIN (app->pipeline), r->tsrtspq, r->tsappsink,  NULL);
-		gst_element_link (r->tsrtspq, r->tsappsink);
 
 		g_object_set (G_OBJECT (r->tsrtspq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 
 		g_object_set (G_OBJECT (r->tsappsink), "emit-signals", TRUE, NULL);
 		g_object_set (G_OBJECT (r->tsappsink), "enable-last-sample", FALSE, NULL);
 		g_signal_connect (r->tsappsink, "new-sample", G_CALLBACK (handover_payload), app);
+
+		gst_bin_add_many (GST_BIN (app->pipeline), r->artspq, r->vrtspq, r->aappsink, r->vappsink,  NULL);
+		gst_element_link (r->artspq, r->aappsink);
+		gst_element_link (r->vrtspq, r->vappsink);
+
+		gst_bin_add_many (GST_BIN (app->pipeline), r->tsrtspq, r->tsappsink,  NULL);
+		gst_element_link (r->tsrtspq, r->tsappsink);
+
+		GstState targetstate;
+		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->hls_server->state == HLS_STATE_DISABLED)
+			targetstate = GST_STATE_READY;
+		else
+			targetstate = GST_STATE_PLAYING;
+
+		if (!assert_state (app, r->tsappsink, targetstate) || !assert_state (app, r->aappsink, targetstate) || !assert_state (app, r->vappsink, targetstate))
+			goto fail;
+
+		if (!assert_state (app, r->tsrtspq, targetstate) || !assert_state (app, r->artspq, targetstate) || !assert_state (app, r->vrtspq, targetstate))
+			goto fail;
 
 		GstPad *teepad, *sinkpad;
 		GstPadLinkReturn ret;
@@ -1705,17 +1719,8 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		gst_object_unref (teepad);
 		gst_object_unref (sinkpad);
 
-		GstStateChangeReturn sret;
-		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->hls_server->state == HLS_STATE_DISABLED)
-			sret = gst_element_set_state (app->pipeline, GST_STATE_READY);
-		else
-			sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
-
-		if (sret == GST_STATE_CHANGE_FAILURE)
-		{
-			GST_ERROR_OBJECT (app, "state change failure for local rtsp pipeline");
+		if (!assert_state (app, app->pipeline, targetstate))
 			goto fail;
-		}
 
 		r->server = g_object_new (GST_TYPE_DREAM_RTSP_SERVER, NULL);
 		g_signal_connect (r->server, "client-connected", (GCallback) client_connected, app);
@@ -1777,6 +1782,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		GST_DEBUG ("set RTSP_STATE_IDLE");
 		r->source_id = gst_rtsp_server_attach (GST_RTSP_SERVER(r->server), NULL);
 		r->uri_parameters = NULL;
+		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enabled_rtsp_server");
 		g_print ("dreambox encoder stream ready at rtsp://%s127.0.0.1:%s%s\n", credentials, app->rtsp_server->rtsp_port, app->rtsp_server->rtsp_ts_path);
 		return TRUE;
 	}
@@ -1803,10 +1809,7 @@ gboolean start_rtsp_pipeline(App* app)
 	}
 
 	assert_tsmux (app);
-
-	GstStateChangeReturn sret;
-	sret = gst_element_set_state (app->pipeline, GST_STATE_PLAYING);
-	if (sret == GST_STATE_CHANGE_FAILURE)
+	if (!assert_state (app, app->pipeline, GST_STATE_PLAYING))
 	{
 		GST_ERROR_OBJECT (app, "GST_STATE_CHANGE_FAILURE for rtsp pipeline");
 		return FALSE;
@@ -1877,21 +1880,23 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 		goto fail;
 	}
 
-	GstPad *sinkpad;
+	GstPad *sinkpad = NULL;
 	GstElement *nextelem = NULL;
 	if (element == app->aq)
 	{
 		nextelem = app->vq;
-		sinkpad = gst_element_get_static_pad (nextelem, "sink");
+		if (GST_IS_ELEMENT(nextelem))
+			sinkpad = gst_element_get_static_pad (nextelem, "sink");
 	}
 	if (element == app->vq)
 	{
 		nextelem = app->tsmux;
-		sinkpad = gst_element_get_static_pad (nextelem, "src");
+		if (GST_IS_ELEMENT(nextelem))
+			sinkpad = gst_element_get_static_pad (nextelem, "src");
 	}
-	GST_DEBUG_OBJECT (pad, "element % " GST_PTR_FORMAT " is now in GST_STATE_READY, installing idle probe on % "GST_PTR_FORMAT"", element, sinkpad);
-	if (GST_IS_ELEMENT(nextelem))
+	if (GST_IS_PAD(sinkpad) && GST_IS_ELEMENT(nextelem))
 	{
+		GST_DEBUG_OBJECT (pad, "element % " GST_PTR_FORMAT " is now in GST_STATE_READY, installing idle probe on % "GST_PTR_FORMAT"", element, sinkpad);
 		gst_object_ref (nextelem);
 		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, tsmux_pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);

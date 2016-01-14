@@ -262,6 +262,9 @@ static gboolean handle_set_property (GDBusConnection *, const gchar *, const gch
 static void handle_method_call (GDBusConnection *, const gchar *, const gchar *, const gchar *, const gchar *, GVariant *, GDBusMethodInvocation *, gpointer);
 static void send_signal (App *app, const gchar *signal_name, GVariant *parameters);
 
+void assert_tsmux(App *app);
+gboolean assert_state(App *app, GstElement *element, GstState targetstate);
+
 static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_data);
 static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data);
 static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data);
