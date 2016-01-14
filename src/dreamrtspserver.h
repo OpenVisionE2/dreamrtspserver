@@ -289,7 +289,7 @@ DreamHLSserver *create_hls_server(App *app);
 gboolean enable_hls_server(App *app, guint port);
 gboolean disable_hls_server(App *app);
 
-static void soup_do_get (SoupServer *server, SoupMessage *msg, const char *path);
+static void soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app);
 static void soup_server_callback (SoupServer *server, SoupMessage *msg, const char *path, GHashTable *query, SoupClientContext *context, gpointer data);
 
 gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstream_port, const gchar *token);

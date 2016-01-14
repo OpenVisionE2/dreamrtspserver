@@ -1374,7 +1374,7 @@ fail:
 }
 
 static void
-soup_do_get (SoupServer *server, SoupMessage *msg, const char *path)
+soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app)
 {
 	char *slash;
 	gchar *hlspath = NULL;
@@ -1431,7 +1431,21 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path)
 		if (g_strrstr (hlspath, ".ts"))
 			soup_message_headers_set_content_type (msg->response_headers, "video/MP2T", NULL);
 		else
+		{
+			GstState state;
+			gst_element_get_state (app->asrc, &state, NULL, GST_MSECOND);
+			if (state != GST_STATE_PLAYING)
+			{
+				assert_tsmux (app);
+				if (!assert_state (app, app->pipeline, GST_STATE_PLAYING))
+				{
+					soup_message_set_status (msg, SOUP_STATUS_BAD_GATEWAY);
+					g_free (hlspath);
+					return;
+				}
+			}
 			soup_message_headers_set_content_type (msg->response_headers, "application/x-mpegURL", NULL);
+		}
 
 		buffer = soup_buffer_new_with_owner (g_mapped_file_get_contents (mapping),
 						     g_mapped_file_get_length (mapping),
@@ -1448,7 +1462,7 @@ soup_server_callback (SoupServer *server, SoupMessage *msg, const char *path, GH
 {
 	GST_TRACE_OBJECT (server, "%s %s HTTP/1.%d", msg->method, path, soup_message_get_http_version (msg));
 	if (msg->method == SOUP_METHOD_GET)
-		soup_do_get (server, msg, path);
+		soup_do_get (server, msg, path, (App *) data);
 	else
 		soup_message_set_status (msg, SOUP_STATUS_NOT_IMPLEMENTED);
 	GST_TRACE_OBJECT (server, "  -> %d %s", msg->status_code, msg->reason_phrase);
@@ -1584,7 +1598,7 @@ gboolean enable_hls_server(App *app, guint port)
 
 		h->port = port;
 		h->soupserver = soup_server_new (SOUP_SERVER_PORT, h->port, SOUP_SERVER_SERVER_HEADER, "dreamhttplive", NULL);
-		soup_server_add_handler (h->soupserver, NULL, soup_server_callback, NULL, NULL);
+		soup_server_add_handler (h->soupserver, NULL, soup_server_callback, app, NULL);
 		soup_server_run_async (h->soupserver);
 		GST_INFO_OBJECT (h->soupserver, "Soup server listening on port %i for http requests...", soup_server_get_port ((h->soupserver)));
 
