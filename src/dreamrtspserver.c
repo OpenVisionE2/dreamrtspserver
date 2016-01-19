@@ -1373,6 +1373,45 @@ fail:
 	return FALSE;
 }
 
+gboolean
+_delete_dir_recursively (GFile *directory, GError **error)
+{
+	GFileEnumerator *children = NULL;
+	GFileInfo *info;
+	gboolean ret = FALSE;
+	children = g_file_enumerate_children (directory, G_FILE_ATTRIBUTE_STANDARD_NAME "," G_FILE_ATTRIBUTE_STANDARD_TYPE, 0, NULL, error);
+	if (children == NULL || error)
+		goto out;
+	info = g_file_enumerator_next_file (children, NULL, error);
+	while (info || error) {
+		GFile *child;
+		const char *name;
+		GFileType type;
+		if (error)
+			goto out;
+		name = g_file_info_get_name (info);
+		child = g_file_get_child (directory, name);
+		type = g_file_info_get_file_type (info);
+		GST_LOG ("delete %s", name);
+		if (type == G_FILE_TYPE_DIRECTORY)
+			ret = _delete_dir_recursively (child, error);
+		else if (type == G_FILE_TYPE_REGULAR)
+			ret = g_file_delete (child, NULL, error);
+		g_object_unref (info);
+		g_object_unref (child);
+		if (!ret)
+			goto out;
+		info = g_file_enumerator_next_file (children, NULL, error);
+	}
+	ret = TRUE;
+	g_file_delete (directory, NULL, error);
+
+out:
+	if (children)
+		g_object_unref (children);
+	return ret;
+}
+
 static void
 soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app)
 {
@@ -2284,6 +2323,10 @@ int main (int argc, char *argv[])
 	free(app.tcp_upstream);
 
 	destroy_pipeline(&app);
+
+	GFile *tmp_dir_file = g_file_new_for_path (HLS_PATH);
+	_delete_dir_recursively (tmp_dir_file, NULL);
+	g_object_unref (tmp_dir_file);
 
 	g_main_loop_unref (app.loop);
 
