@@ -718,17 +718,20 @@ static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo
 {
 	App *app = user_data;
 	DreamTCPupstream *t = app->tcp_upstream;
-	GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER (info);
-	if (GST_IS_BUFFER(buffer) && t->id_signal_waiting)
+	if (info->type & GST_PAD_PROBE_TYPE_BUFFER      && GST_IS_BUFFER     (GST_PAD_PROBE_INFO_BUFFER (info)) ||
+	    info->type & GST_PAD_PROBE_TYPE_BUFFER_LIST && gst_buffer_list_length(GST_PAD_PROBE_INFO_BUFFER_LIST (info)))
 	{
 		GST_DEBUG_OBJECT (app, "cancel upstream_set_waiting timeout because data flow was restored!");
 		g_source_remove (t->id_signal_waiting);
 		t->id_signal_waiting = 0;
 		g_source_remove (t->id_signal_keepalive);
 		t->id_signal_waiting = 0;
+		t->id_resume = 0;
+		return GST_PAD_PROBE_REMOVE;
 	}
-	t->id_resume = 0;
-	return GST_PAD_PROBE_REMOVE;
+	else
+		GST_WARNING_OBJECT (app, "probed unhandled % "GST_PTR_FORMAT ", dataflow not restored?", info->data);
+	return GST_PAD_PROBE_OK;
 }
 
 static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data)
