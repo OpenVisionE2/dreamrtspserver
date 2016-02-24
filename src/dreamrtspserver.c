@@ -1359,6 +1359,11 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		else
 			GST_DEBUG_OBJECT (app, "no token specified!");
 
+		if (!assert_state (app, app->pipeline, GST_STATE_PLAYING))
+		{
+			GST_ERROR_OBJECT (app, "GST_STATE_CHANGE_FAILURE for TCP upstream");
+			return FALSE;
+		}
 		GST_INFO_OBJECT(app, "enabled TCP upstream! upstreamState = UPSTREAM_STATE_CONNECTING");
 		DREAMRTSPSERVER_UNLOCK (app);
 		return TRUE;
