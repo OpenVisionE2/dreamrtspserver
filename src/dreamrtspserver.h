@@ -60,7 +60,7 @@ GST_DEBUG_CATEGORY (dreamrtspserver_debug);
 
 #define MAX_OVERRUNS 5
 #define OVERRUN_TIME G_GINT64_CONSTANT(15)*GST_SECOND
-#define BITRATE_AVG_PERIOD G_GINT64_CONSTANT(5)*GST_SECOND
+#define BITRATE_AVG_PERIOD G_GINT64_CONSTANT(6)*GST_SECOND
 
 #define RESUME_DELAY 20
 
@@ -126,7 +126,7 @@ typedef struct {
 	upstreamState state;
 	guint overrun_counter;
 	GstClockTime overrun_period, measure_start;
-	guint id_signal_waiting, id_signal_keepalive;
+	guint id_signal_overrun, id_signal_waiting, id_signal_keepalive;
 	gulong id_resume, id_bitrate_measure;
 	gsize bitrate_sum;
 	gint bitrate_avg;

@@ -240,6 +240,8 @@ gboolean upstream_resume_transmitting(App *app)
 	t->overrun_counter = 0;
 	t->overrun_period = GST_CLOCK_TIME_NONE;
 	t->id_signal_waiting = 0;
+	if (t->id_signal_keepalive)
+		g_source_remove (t->id_signal_keepalive);
 	t->id_signal_keepalive = 0;
 	return G_SOURCE_REMOVE;
 }
@@ -721,11 +723,17 @@ static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo
 	if (info->type & GST_PAD_PROBE_TYPE_BUFFER      && GST_IS_BUFFER     (GST_PAD_PROBE_INFO_BUFFER (info)) ||
 	    info->type & GST_PAD_PROBE_TYPE_BUFFER_LIST && gst_buffer_list_length(GST_PAD_PROBE_INFO_BUFFER_LIST (info)))
 	{
-		GST_DEBUG_OBJECT (app, "cancel upstream_set_waiting timeout because data flow was restored!");
-		g_source_remove (t->id_signal_waiting);
+		QUEUE_DEBUG;
+		GST_LOG_OBJECT (app, "cancel upstream_set_waiting timeout because data flow was restored! queue properties current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "",
+				  cur_bytes, cur_buf, GST_TIME_ARGS(cur_time));
+		if (t->id_signal_waiting)
+			g_source_remove (t->id_signal_waiting);
 		t->id_signal_waiting = 0;
-		g_source_remove (t->id_signal_keepalive);
-		t->id_signal_waiting = 0;
+		if (t->id_signal_keepalive)
+			g_source_remove (t->id_signal_keepalive);
+		t->id_signal_keepalive = 0;
+		if (t->id_signal_overrun == 0)
+			t->id_signal_overrun = g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
 		t->id_resume = 0;
 		return GST_PAD_PROBE_REMOVE;
 	}
@@ -758,7 +766,7 @@ static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInf
 	} while (idx < num_buffers);
 
 	QUEUE_DEBUG;
-	GST_LOG_OBJECT (app, "probetype=%i num_buffers=%i data=% "GST_PTR_FORMAT " size was=%zu bitrate_sum=%zu now=%" GST_TIME_FORMAT " avg at %" GST_TIME_FORMAT " queue properties current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "",
+	GST_TRACE_OBJECT (app, "probetype=%i num_buffers=%i data=% "GST_PTR_FORMAT " size was=%zu bitrate_sum=%zu now=%" GST_TIME_FORMAT " avg at %" GST_TIME_FORMAT " queue properties current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "",
 			info->type, num_buffers, info->data, gst_buffer_get_size (buffer), t->bitrate_sum, GST_TIME_ARGS(now), GST_TIME_ARGS(t->measure_start+BITRATE_AVG_PERIOD), cur_bytes, cur_buf, GST_TIME_ARGS(cur_time));
 	if (now > t->measure_start+BITRATE_AVG_PERIOD)
 	{
@@ -844,7 +852,7 @@ static void queue_underrun (GstElement * queue, gpointer user_data)
 // 			g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
 			g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(-1), NULL);
 			g_signal_handlers_disconnect_by_func (queue, G_CALLBACK (queue_underrun), app);
-			g_signal_connect (queue, "overrun", G_CALLBACK (queue_overrun), app);
+			t->id_signal_overrun = g_signal_connect (queue, "overrun", G_CALLBACK (queue_overrun), app);
 			t->state = UPSTREAM_STATE_TRANSMITTING;
 			send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_TRANSMITTING));
 			if (t->id_bitrate_measure == 0)
@@ -877,22 +885,28 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 			GST_DEBUG_OBJECT (queue, "initial queue overrun after connect");
 // 			g_object_set (G_OBJECT (t->tstcpq), "leaky", 0, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, "min-threshold-buffers", 0, NULL);
 			g_signal_handlers_disconnect_by_func(t->tstcpq, G_CALLBACK (queue_overrun), app);
+			t->id_signal_overrun = 0;
 			DREAMRTSPSERVER_UNLOCK (app);
 			upstream_set_waiting (app);
 			return;
 		}
 		else if (t->state == UPSTREAM_STATE_TRANSMITTING)
 		{
-			t->overrun_counter++;
-
 			if (t->id_signal_waiting)
 			{
 				g_signal_handlers_disconnect_by_func(t->tstcpq, G_CALLBACK (queue_overrun), app);
+				t->id_signal_overrun = 0;
 				GST_DEBUG_OBJECT (queue, "disconnect overrun callback and wait for timeout or for buffer flow!");
 				DREAMRTSPSERVER_UNLOCK (app);
 				return;
 			}
+			t->overrun_counter++;
 			GST_DEBUG_OBJECT (queue, "queue overrun during transmit... %i (max %i) overruns within %" GST_TIME_FORMAT "", t->overrun_counter, MAX_OVERRUNS, GST_TIME_ARGS (now-t->overrun_period));
+			if (now > t->overrun_period+OVERRUN_TIME)
+			{
+				t->overrun_counter = 0;
+				t->overrun_period = now;
+			}
 			if (t->overrun_counter >= MAX_OVERRUNS)
 			{
 				if (t->auto_bitrate)
@@ -906,7 +920,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 				{
 					t->state = UPSTREAM_STATE_OVERLOAD;
 					send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_OVERLOAD));
-					GST_DEBUG_OBJECT (queue, "auto overload handling diabled, go into UPSTREAM_STATE_OVERLOAD");
+					GST_DEBUG_OBJECT (queue, "auto overload handling disabled, go into UPSTREAM_STATE_OVERLOAD");
 					if (t->id_signal_waiting)
 						g_source_remove (t->id_signal_waiting);
 					t->id_signal_waiting = g_timeout_add_seconds (RESUME_DELAY, (GSourceFunc) upstream_resume_transmitting, app);
@@ -921,12 +935,6 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 				if (t->id_signal_waiting)
 					g_source_remove (t->id_signal_waiting);
 				t->id_signal_waiting = g_timeout_add_seconds (5, (GSourceFunc) upstream_set_waiting, app);
-			}
-
-			if (now > t->overrun_period+OVERRUN_TIME)
-			{
-				t->overrun_counter = 0;
-				t->overrun_period = now;
 			}
 		}
 		else if (t->state == UPSTREAM_STATE_OVERLOAD)
@@ -1278,6 +1286,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		assert_tsmux (app);
 		DREAMRTSPSERVER_LOCK (app);
 
+		t->id_signal_overrun = 0;
 		t->id_signal_waiting = 0;
 		t->id_signal_keepalive = 0;
 		t->id_bitrate_measure = 0;
@@ -1293,8 +1302,8 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 
 		g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 400, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(0), NULL);
 
-		gulong handler_id = g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
-		GST_INFO_OBJECT (app, "installed %" GST_PTR_FORMAT " overrun handler id=%lu", t->tstcpq, handler_id);
+		t->id_signal_overrun = g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
+		GST_TRACE_OBJECT (app, "installed %" GST_PTR_FORMAT " overrun handler id=%lu", t->tstcpq, t->id_signal_overrun);
 
 		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(2)*GST_SECOND, NULL);
 		g_object_set (t->tcpsink, "blocksize", BLOCK_SIZE, NULL);
