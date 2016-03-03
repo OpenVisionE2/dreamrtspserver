@@ -575,6 +575,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 				}
 				if (err->code == GST_RESOURCE_ERROR_WRITE)
 				{
+					send_signal (app, "upstreamStateChanged", g_variant_new("(i)", UPSTREAM_STATE_FAILED));
 					GST_INFO ("element %s: %s -> this means PEER DISCONNECTED", name, err->message);
 					GST_DEBUG ("Additional ERROR debug info: %s", debug);
 // 					DREAMRTSPSERVER_UNLOCK (app);
@@ -607,6 +608,14 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 			GST_WARNING ("WARNING: from element %s: %s", name, err->message);
 			if (debug != NULL)
 				GST_WARNING ("Additional debug info: %s", debug);
+#if 1
+			if (err->domain == GST_STREAM_ERROR && err->code == GST_STREAM_ERROR_ENCODE)
+			{
+				GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"dreamrtspserver-encode-error");
+				g_main_loop_quit (app->loop);
+				return FALSE;
+			}
+#endif
 			g_error_free (err);
 			g_free (debug);
 			g_free (name);
@@ -1044,8 +1053,8 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 	{
 		if ( gst_debug_category_get_threshold (dreamrtspserver_debug) >= GST_LEVEL_LOG)
 			GST_TRACE_OBJECT(appsink, "no rtsp clients, discard payload!");
-		else
-			g_print (".");
+// 		else
+// 			g_print (".");
 	}
 	gst_sample_unref (sample);
 
@@ -1096,7 +1105,7 @@ gboolean assert_state(App *app, GstElement *element, GstState state)
 				gst_iterator_free(iter);
 				if (fail)
 				{
-					GST_ERROR_OBJECT (app, "pipeline didn't complete GST_STATE_CHANGE_ASYNC to %s within %" GST_TIME_FORMAT ", currently in %s", GST_TIME_ARGS(timeout), gst_element_state_get_name (state), gst_element_state_get_name (pipeline_state));
+					GST_ERROR_OBJECT (app, "pipeline didn't complete GST_STATE_CHANGE_ASYNC to %s within %" GST_TIME_FORMAT ", currently in %s", gst_element_state_get_name (state), GST_TIME_ARGS(timeout), gst_element_state_get_name (pipeline_state));
 					return FALSE;
 				}
 			}
@@ -1305,7 +1314,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		t->id_signal_overrun = g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
 		GST_TRACE_OBJECT (app, "installed %" GST_PTR_FORMAT " overrun handler id=%lu", t->tstcpq, t->id_signal_overrun);
 
-		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(2)*GST_SECOND, NULL);
+		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(3)*GST_SECOND, NULL);
 		g_object_set (t->tcpsink, "blocksize", BLOCK_SIZE, NULL);
 
 		g_object_set (t->tcpsink, "host", upstream_host, NULL);
@@ -1590,6 +1599,29 @@ gboolean disable_hls_server(App *app)
 	return FALSE;
 }
 
+static GstPadProbeReturn _detect_keyframes_probe (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
+{
+	App *app = user_data;
+	GstBuffer *buffer;
+	guint idx = 0, num_buffers = 1;
+	do {
+		if (info->type & GST_PAD_PROBE_TYPE_BUFFER)
+		{
+			buffer = GST_PAD_PROBE_INFO_BUFFER (info);
+		}
+		else if (info->type & GST_PAD_PROBE_TYPE_BUFFER_LIST)
+		{
+			GstBufferList *bufferlist = GST_PAD_PROBE_INFO_BUFFER_LIST (info);
+			num_buffers = gst_buffer_list_length (bufferlist);
+			buffer = gst_buffer_list_get (bufferlist, idx);
+		}
+		if (GST_IS_BUFFER(buffer) && !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
+			GST_INFO_OBJECT (app, "KEYFRAME %" GST_PTR_FORMAT " detected @ %" GST_PTR_FORMAT " num_buffers=%i", buffer, pad, num_buffers);
+		idx++;
+	} while (idx < num_buffers);
+	return GST_PAD_PROBE_OK;
+}
+
 gboolean enable_hls_server(App *app, guint port)
 {
 	GST_INFO_OBJECT(app, "enable_hls_server");
@@ -1649,6 +1681,8 @@ gboolean enable_hls_server(App *app, guint port)
 		gst_object_unref (teepad);
 		gst_object_unref (sinkpad);
 
+		if (app->tcp_upstream->state == UPSTREAM_STATE_WAITING)
+			unpause_source_pipeline(app);
 		if (!assert_state (app, app->pipeline, GST_STATE_PLAYING))
 			goto fail;
 
@@ -1658,6 +1692,16 @@ gboolean enable_hls_server(App *app, guint port)
 		soup_server_run_async (h->soupserver);
 		GST_INFO_OBJECT (h->soupserver, "Soup server listening on port %i for http requests...", soup_server_get_port ((h->soupserver)));
 
+/*		GstPad *pad = gst_element_get_static_pad (app->vparse, "src");
+		gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER|GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) _detect_keyframes_probe, app, NULL);
+		gst_object_unref (pad);
+		pad = gst_element_get_static_pad (app->vsrc, "src");
+		gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER|GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) _detect_keyframes_probe, app, NULL);
+		gst_object_unref (pad);
+		GstPad *pad2 = gst_element_get_static_pad (h->hlssink, "sink");
+		gst_pad_add_probe (pad2, GST_PAD_PROBE_TYPE_BUFFER|GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) _detect_keyframes_probe, app, NULL);
+		gst_object_unref (pad2);
+*/
 		h->state = HLS_STATE_IDLE;
 		GST_DEBUG ("set HLS_STATE_IDLE");
 		DREAMRTSPSERVER_UNLOCK (app);
@@ -1992,18 +2036,23 @@ gboolean halt_source_pipeline(App* app)
 
 gboolean pause_source_pipeline(App* app)
 {
-	GST_INFO_OBJECT(app, "pause_source_pipeline... setting sources to GST_STATE_PAUSED");
-
-	if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_NO_PREROLL && gst_element_set_state (app->vsrc, GST_STATE_PAUSED) == GST_STATE_CHANGE_NO_PREROLL)
-		return TRUE;
-	GST_WARNING("can't set sources to GST_STATE_PAUSED!");
-	return FALSE;
+	if (app->rtsp_server->state <= RTSP_STATE_IDLE && app->hls_server->state == RTSP_STATE_DISABLED)
+	{
+		GST_INFO_OBJECT(app, "pause_source_pipeline... setting sources to GST_STATE_PAUSED rtsp_server->state=%i hls_server->state=%i", app->rtsp_server->state, app->hls_server->state);
+		if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) != GST_STATE_CHANGE_NO_PREROLL || gst_element_set_state (app->vsrc, GST_STATE_PAUSED) != GST_STATE_CHANGE_NO_PREROLL)
+		{
+			GST_WARNING ("can't set pipeline to GST_STATE_PAUSED!");
+			return FALSE;
+		}
+	}
+	else
+		GST_DEBUG ("not pausing pipeline because rtsp_server->state=%i hls_server->state=%i", app->rtsp_server->state, app->hls_server->state);
+	return TRUE;
 }
 
 gboolean unpause_source_pipeline(App* app)
 {
 	GST_INFO_OBJECT(app, "unpause_source_pipeline... setting sources to GST_STATE_PLAYING");
-
 	if (gst_element_set_state (app->asrc, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE || gst_element_set_state (app->vsrc, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
 	{
 		GST_WARNING("can't set sources to GST_STATE_PLAYING!");

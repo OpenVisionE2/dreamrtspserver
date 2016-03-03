@@ -105,7 +105,8 @@ typedef enum {
         UPSTREAM_STATE_WAITING = 2,
         UPSTREAM_STATE_TRANSMITTING = 3,
         UPSTREAM_STATE_OVERLOAD = 4,
-        UPSTREAM_STATE_ADJUSTING = 5
+        UPSTREAM_STATE_ADJUSTING = 5,
+	UPSTREAM_STATE_FAILED = 9
 } upstreamState;
 
 typedef enum {
