@@ -272,6 +272,11 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 		if (app->tcp_upstream)
 			return g_variant_new_int32 (app->tcp_upstream->state);
 	}
+	else if (g_strcmp0 (property_name, "HLSState") == 0)
+	{
+		if (app->hls_server)
+			return g_variant_new_int32 (app->hls_server->state);
+	}
 	else if (g_strcmp0 (property_name, "inputMode") == 0)
 	{
 		inputMode input_mode = -1;
@@ -1438,6 +1443,18 @@ out:
 	return ret;
 }
 
+gboolean hls_client_timeout (gpointer user_data)
+{
+	App *app = user_data;
+	GST_INFO_OBJECT(app, "HLS clients stopped downloading, going into IDLE");
+	if (app->hls_server)
+	{
+		app->hls_server->state = HLS_STATE_IDLE;
+		send_signal (app, "HLSStateChanged", g_variant_new("(i)", HLS_STATE_IDLE));
+	}
+	return FALSE;
+}
+
 static void
 soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app)
 {
@@ -1512,6 +1529,15 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app)
 			soup_message_headers_set_content_type (msg->response_headers, "application/x-mpegURL", NULL);
 		}
 
+		if (app->hls_server->state == HLS_STATE_IDLE)
+		{
+			app->hls_server->state = HLS_STATE_RUNNING;
+			send_signal (app, "HLSStateChanged", g_variant_new("(i)", HLS_STATE_RUNNING));
+			if (app->hls_server->id_timeout)
+				g_source_remove (app->hls_server->id_timeout);
+			g_timeout_add_seconds (5*HLS_FRAGMENT_DURATION, (GSourceFunc) hls_client_timeout, app);
+		}
+
 		buffer = soup_buffer_new_with_owner (g_mapped_file_get_contents (mapping),
 						     g_mapped_file_get_length (mapping),
 						     mapping, (GDestroyNotify)g_mapped_file_unref);
@@ -1584,6 +1610,7 @@ gboolean disable_hls_server(App *app)
 	{
 		DREAMRTSPSERVER_LOCK (app);
 		h->state = HLS_STATE_DISABLED;
+		send_signal (app, "HLSStateChanged", g_variant_new("(i)", HLS_STATE_DISABLED));
 		gst_object_ref (h->queue);
 		gst_object_ref (h->hlssink);
 		GstPad *sinkpad;
@@ -1703,6 +1730,7 @@ gboolean enable_hls_server(App *app, guint port)
 		gst_object_unref (pad2);
 */
 		h->state = HLS_STATE_IDLE;
+		send_signal (app, "HLSStateChanged", g_variant_new("(i)", HLS_STATE_IDLE));
 		GST_DEBUG ("set HLS_STATE_IDLE");
 		DREAMRTSPSERVER_UNLOCK (app);
 		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_hls_server");
@@ -1723,6 +1751,7 @@ fail:
 DreamHLSserver *create_hls_server(App *app)
 {
 	DreamHLSserver *h = malloc(sizeof(DreamHLSserver));
+	send_signal (app, "HLSStateChanged", g_variant_new("(i)", HLS_STATE_DISABLED));
 	h->state = HLS_STATE_DISABLED;
 	h->queue = NULL;
 	h->hlssink = NULL;
