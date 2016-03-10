@@ -210,10 +210,10 @@ static const gchar introspection_xml[] =
   "      <arg type='u' name='port' direction='in'/>"
   "      <arg type='b' name='result' direction='out'/>"
   "    </method>"
-  "    <signal name='HLSStateChanged'>"
+  "    <signal name='hlsStateChanged'>"
   "      <arg type='i' name='state' direction='out'/>"
   "    </signal>"
-  "    <property type='i' name='HLSState' access='read'/>"
+  "    <property type='i' name='hlsState' access='read'/>"
   #if HAVE_UPSTREAM
   "    <method name='enableUpstream'>"
   "      <arg type='b' name='state' direction='in'/>"
