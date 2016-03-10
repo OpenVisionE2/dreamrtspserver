@@ -662,6 +662,7 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 		if (r->state == RTSP_STATE_RUNNING)
 		{
 			GST_DEBUG ("set RTSP_STATE_IDLE");
+			send_signal (app, "rtspStateChanged", g_variant_new("(i)", RTSP_STATE_IDLE));
 			r->state = RTSP_STATE_IDLE;
 		}
 	}
@@ -717,6 +718,7 @@ static void media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media
 	}
 	r->rtsp_start_pts = r->rtsp_start_dts = GST_CLOCK_TIME_NONE;
 	r->state = RTSP_STATE_RUNNING;
+	send_signal (app, "rtspStateChanged", g_variant_new("(i)", RTSP_STATE_RUNNING));
 	GST_DEBUG ("set RTSP_STATE_RUNNING");
 	start_rtsp_pipeline(app);
 	DREAMRTSPSERVER_UNLOCK (app);
@@ -1761,6 +1763,7 @@ DreamHLSserver *create_hls_server(App *app)
 DreamRTSPserver *create_rtsp_server(App *app)
 {
 	DreamRTSPserver *r = malloc(sizeof(DreamRTSPserver));
+	send_signal (app, "rtspStateChanged", g_variant_new("(i)", RTSP_STATE_DISABLED));
 	r->state = RTSP_STATE_DISABLED;
 	r->server = NULL;
 	r->ts_factory = r->es_factory = NULL;
@@ -1922,6 +1925,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_ts_path, g_object_ref(GST_RTSP_MEDIA_FACTORY (r->ts_factory)));
 		gst_rtsp_mount_points_add_factory (r->mounts, r->rtsp_es_path, g_object_ref(GST_RTSP_MEDIA_FACTORY (r->es_factory)));
 		r->state = RTSP_STATE_IDLE;
+		send_signal (app, "rtspStateChanged", g_variant_new("(i)", RTSP_STATE_IDLE));
 		GST_DEBUG ("set RTSP_STATE_IDLE");
 		r->source_id = gst_rtsp_server_attach (GST_RTSP_SERVER(r->server), NULL);
 		r->uri_parameters = NULL;
@@ -2213,6 +2217,7 @@ gboolean disable_rtsp_server(App *app)
 		g_free(r->rtsp_ts_path);
 		g_free(r->rtsp_es_path);
 		g_free(r->uri_parameters);
+		send_signal (app, "rtspStateChanged", g_variant_new("(i)", RTSP_STATE_DISABLED));
 		r->state = RTSP_STATE_DISABLED;
 
 		gst_object_ref (r->tsrtspq);
