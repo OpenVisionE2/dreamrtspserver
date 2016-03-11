@@ -657,7 +657,7 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	}
 	if (!r->es_media && !r->ts_media)
 	{
-		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
+		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->hls_server->state == HLS_STATE_DISABLED)
 			halt_source_pipeline(app);
 		if (r->state == RTSP_STATE_RUNNING)
 		{
@@ -2185,7 +2185,7 @@ static GstPadProbeReturn rtsp_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo
 	if (!r->tsappsink && !r->aappsink && !r->vappsink)
 	{
 		GST_INFO("!r->tsappsink && !r->aappsink && !r->vappsink");
-		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
+		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->hls_server->state == HLS_STATE_DISABLED)
 			halt_source_pipeline(app);
 		GST_INFO("local rtsp server disabled!");
 	}
@@ -2284,7 +2284,7 @@ static GstPadProbeReturn upstream_pad_probe_unlink_cb (GstPad * pad, GstPadProbe
 		t->tstcpq = NULL;
 		t->tcpsink = NULL;
 
-		if (app->rtsp_server->state < RTSP_STATE_RUNNING)
+		if (app->rtsp_server->state < RTSP_STATE_RUNNING && app->hls_server->state == HLS_STATE_DISABLED)
 			halt_source_pipeline(app);
 		GST_INFO("tcp_upstream disabled!");
 		t->state = UPSTREAM_STATE_DISABLED;
