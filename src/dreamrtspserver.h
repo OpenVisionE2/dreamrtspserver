@@ -164,6 +164,7 @@ typedef struct {
 	hlsState state;
 	SoupServer *soupserver;
 	guint port;
+	gchar *hls_user, *hls_pass;
 	guint id_timeout;
 } DreamHLSserver;
 
@@ -208,6 +209,8 @@ static const gchar introspection_xml[] =
   "    <method name='enableHLS'>"
   "      <arg type='b' name='state' direction='in'/>"
   "      <arg type='u' name='port' direction='in'/>"
+  "      <arg type='s' name='user' direction='in'/>"
+  "      <arg type='s' name='pass' direction='in'/>"
   "      <arg type='b' name='result' direction='out'/>"
   "    </method>"
   "    <signal name='hlsStateChanged'>"
@@ -296,7 +299,7 @@ gboolean watchdog_ping(gpointer user_data);
 gboolean quit_signal(gpointer loop);
 
 DreamHLSserver *create_hls_server(App *app);
-gboolean enable_hls_server(App *app, guint port);
+gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar *pass);
 gboolean disable_hls_server(App *app);
 gboolean hls_client_timeout (gpointer user_data);
 static void soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app);

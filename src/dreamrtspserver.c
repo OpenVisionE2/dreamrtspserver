@@ -445,11 +445,13 @@ static void handle_method_call (GDBusConnection       *connection,
 		{
 			gboolean state;
 			guint32 port;
-			g_variant_get (parameters, "(bu)", &state, &port);
-			GST_DEBUG("app->pipeline=%p, enableHLS state=%i port=%i", app->pipeline, state, port);
+			const gchar *user, *pass;
+
+			g_variant_get (parameters, "(bu&s&s)", &state, &port, &user, &pass);
+			GST_DEBUG("app->pipeline=%p, enableHLS state=%i port=%i user=%s pass=%s", app->pipeline, state, port, user, pass);
 
 			if (state == TRUE && app->hls_server->state >= HLS_STATE_DISABLED)
-				result = enable_hls_server(app, port);
+				result = enable_hls_server(app, port, user, pass);
 			else if (state == FALSE && app->hls_server->state >= HLS_STATE_IDLE)
                         {
 				result = disable_hls_server(app);
@@ -1550,6 +1552,21 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app)
 	soup_message_set_status (msg, SOUP_STATUS_OK);
 }
 
+static gboolean
+soup_server_auth_callback (SoupAuthDomain *domain, SoupMessage *msg, const char *username, const char *password, gpointer user_data)
+{
+	App *app = (App *) user_data;
+	DreamHLSserver *h = app->hls_server;
+	if (g_strcmp0(h->hls_user, username) == 0 && strcmp(h->hls_pass, password) == 0)
+	{
+		GST_TRACE_OBJECT (app->hls_server, "authenticated request with credentials %s:%s", username, password);
+		return TRUE;
+	}
+	else
+		GST_WARNING_OBJECT (app->hls_server, "denied authentication request with credentials %s:%s", username, password); 
+	return FALSE;
+}
+
 static void
 soup_server_callback (SoupServer *server, SoupMessage *msg, const char *path, GHashTable *query, SoupClientContext *context, gpointer data)
 {
@@ -1651,9 +1668,9 @@ static GstPadProbeReturn _detect_keyframes_probe (GstPad * pad, GstPadProbeInfo 
 	return GST_PAD_PROBE_OK;
 }
 
-gboolean enable_hls_server(App *app, guint port)
+gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar *pass)
 {
-	GST_INFO_OBJECT(app, "enable_hls_server");
+	GST_INFO_OBJECT(app, "enable_hls_server port=%i user=%s pass=%s", port, user, pass);
 	if (!app->pipeline)
 	{
 		GST_ERROR_OBJECT (app, "failed to enable hls server because source pipeline is NULL!");
@@ -1719,7 +1736,24 @@ gboolean enable_hls_server(App *app, guint port)
 		h->soupserver = soup_server_new (SOUP_SERVER_PORT, h->port, SOUP_SERVER_SERVER_HEADER, "dreamhttplive", NULL);
 		soup_server_add_handler (h->soupserver, NULL, soup_server_callback, app, NULL);
 		soup_server_run_async (h->soupserver);
-		GST_INFO_OBJECT (h->soupserver, "Soup server listening on port %i for http requests...", soup_server_get_port ((h->soupserver)));
+
+		gchar *credentials = "";
+		if (strlen(user)) {
+			h->hls_user = g_strdup(user);
+			h->hls_pass = g_strdup(pass);
+			SoupAuthDomain *soupauthdomain = soup_auth_domain_basic_new (
+			SOUP_AUTH_DOMAIN_REALM, "Dreambox HLS Server",
+			SOUP_AUTH_DOMAIN_BASIC_AUTH_CALLBACK, soup_server_auth_callback,
+			SOUP_AUTH_DOMAIN_BASIC_AUTH_DATA, app,
+			SOUP_AUTH_DOMAIN_ADD_PATH, "",
+			NULL);
+			soup_server_add_auth_domain (h->soupserver, soupauthdomain);
+			credentials = g_strdup_printf("%s:%s@", user, pass);
+		}
+		else
+			h->hls_user = h->hls_pass = NULL;
+
+		GST_INFO_OBJECT (h->soupserver, "SOUP HLS server ready at http://%s127.0.0.1:%i/%s ...", credentials, soup_server_get_port (h->soupserver), HLS_PLAYLIST_NAME);
 
 /*		GstPad *pad = gst_element_get_static_pad (app->vparse, "src");
 		gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER|GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) _detect_keyframes_probe, app, NULL);
@@ -1734,6 +1768,7 @@ gboolean enable_hls_server(App *app, guint port)
 		h->state = HLS_STATE_IDLE;
 		send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_IDLE));
 		GST_DEBUG ("set HLS_STATE_IDLE");
+		g_free (credentials);
 		DREAMRTSPSERVER_UNLOCK (app);
 		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_hls_server");
 		return TRUE;
@@ -1931,6 +1966,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		r->uri_parameters = NULL;
 		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enabled_rtsp_server");
 		g_print ("dreambox encoder stream ready at rtsp://%s127.0.0.1:%s%s\n", credentials, app->rtsp_server->rtsp_port, app->rtsp_server->rtsp_ts_path);
+		g_free (credentials);
 		return TRUE;
 	}
 	else
