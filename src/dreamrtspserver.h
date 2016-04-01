@@ -163,6 +163,7 @@ typedef struct {
 	GstElement *hlssink;
 	hlsState state;
 	SoupServer *soupserver;
+	SoupAuthDomain *soupauthdomain;
 	guint port;
 	gchar *hls_user, *hls_pass;
 	guint id_timeout;

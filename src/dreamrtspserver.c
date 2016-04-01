@@ -1616,7 +1616,7 @@ static GstPadProbeReturn hls_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo 
 
 	if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->rtsp_server->state == RTSP_STATE_DISABLED)
 		halt_source_pipeline(app);
-	GST_INFO ("HLS server disabled!");
+	GST_INFO ("HLS server unlinked!");
 
 	return GST_PAD_PROBE_REMOVE;
 }
@@ -1637,6 +1637,12 @@ gboolean disable_hls_server(App *app)
 		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, hls_pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);
 		soup_server_quit (h->soupserver);
+		if (h->soupauthdomain)
+		{
+			g_object_unref (h->soupauthdomain);
+			g_free(h->hls_user);
+			g_free(h->hls_pass);
+		}
 		g_object_unref (h->soupserver);
 		DREAMRTSPSERVER_UNLOCK (app);
 		GST_INFO("hls server disabled, soupserver unref'ed, set HLS_STATE_DISABLED");
@@ -1741,17 +1747,20 @@ gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar 
 		if (strlen(user)) {
 			h->hls_user = g_strdup(user);
 			h->hls_pass = g_strdup(pass);
-			SoupAuthDomain *soupauthdomain = soup_auth_domain_basic_new (
+			h->soupauthdomain = soup_auth_domain_basic_new (
 			SOUP_AUTH_DOMAIN_REALM, "Dreambox HLS Server",
 			SOUP_AUTH_DOMAIN_BASIC_AUTH_CALLBACK, soup_server_auth_callback,
 			SOUP_AUTH_DOMAIN_BASIC_AUTH_DATA, app,
 			SOUP_AUTH_DOMAIN_ADD_PATH, "",
 			NULL);
-			soup_server_add_auth_domain (h->soupserver, soupauthdomain);
+			soup_server_add_auth_domain (h->soupserver, h->soupauthdomain);
 			credentials = g_strdup_printf("%s:%s@", user, pass);
 		}
 		else
+		{
 			h->hls_user = h->hls_pass = NULL;
+			h->soupauthdomain = NULL;
+		}
 
 		GST_INFO_OBJECT (h->soupserver, "SOUP HLS server ready at http://%s127.0.0.1:%i/%s ...", credentials, soup_server_get_port (h->soupserver), HLS_PLAYLIST_NAME);
 
