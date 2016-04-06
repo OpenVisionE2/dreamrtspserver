@@ -1743,7 +1743,7 @@ gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar 
 		soup_server_add_handler (h->soupserver, NULL, soup_server_callback, app, NULL);
 		soup_server_run_async (h->soupserver);
 
-		gchar *credentials = "";
+		gchar *credentials = g_strdup("");
 		if (strlen(user)) {
 			h->hls_user = g_strdup(user);
 			h->hls_pass = g_strdup(pass);
@@ -1930,7 +1930,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 
 		DREAMRTSPSERVER_UNLOCK (app);
 
-		gchar *credentials = "";
+		gchar *credentials = g_strdup("");
 		if (strlen(user)) {
 			r->rtsp_user = g_strdup(user);
 			r->rtsp_pass = g_strdup(pass);
