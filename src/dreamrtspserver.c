@@ -429,7 +429,7 @@ static void handle_method_call (GDBusConnection       *connection,
 			else if (state == FALSE && app->rtsp_server->state >= RTSP_STATE_IDLE)
                         {
 				result = disable_rtsp_server(app);
-				if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
+				if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->hls_server->state == HLS_STATE_DISABLED)
 				{
 					destroy_pipeline(app);
 					create_source_pipeline(app);
