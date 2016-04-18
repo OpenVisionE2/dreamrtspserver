@@ -474,7 +474,7 @@ static void handle_method_call (GDBusConnection       *connection,
 			guint32 upstream_port;
 
 			g_variant_get (parameters, "(b&su&s)", &state, &upstream_host, &upstream_port, &token);
-			GST_DEBUG("app->pipeline=%p, enableUpstream state=%i host=%s port=%i token=%s", app->pipeline, state, upstream_host, upstream_port, token);
+			GST_DEBUG("app->pipeline=%p, enableUpstream state=%i host=%s port=%i token=%s (currently in state %s)", app->pipeline, state, upstream_host, upstream_port, token, app->tcp_upstream->state);
 
 			if (state == TRUE && app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
 				result = enable_tcp_upstream(app, upstream_host, upstream_port, token);
@@ -1382,8 +1382,8 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 			goto fail;
 		}
 
-		if (!assert_state (app, t->tcpsink, GST_STATE_PLAYING) || !assert_state (app, t->tstcpq, GST_STATE_PLAYING))
-			goto fail;
+// 		if (!assert_state (app, t->tcpsink, GST_STATE_PLAYING) || !assert_state (app, t->tstcpq, GST_STATE_PLAYING))
+// 			goto fail;
 
 		GstPadLinkReturn ret;
 		GstPad *srcpad, *sinkpad;
