@@ -1108,12 +1108,20 @@ gboolean assert_state(App *app, GstElement *element, GstState state)
 					while (GST_ITERATOR_OK == gst_iterator_next(iter, (GValue*)&item))
 					{
 						GstElement *elem = g_value_get_object(&item);
+						GstElementFactory *factory = gst_element_get_factory (elem);
 						gst_element_get_state (elem, &current_state, NULL, GST_MSECOND);
 						if (current_state != state && (element == app->pipeline || element == elem))
 						{
-							GST_WARNING_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (current_state));
 							if (element == app->pipeline)
-								fail = TRUE;
+							{
+								if (gst_element_factory_list_is_type (factory, GST_ELEMENT_FACTORY_TYPE_SINK))
+									GST_LOG_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"'s state=%s (this is a sink element, so don't worry...)", elem, gst_element_state_get_name (current_state));
+								else
+								{
+									GST_WARNING_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"'s state=%s -> FAIL", elem, gst_element_state_get_name (current_state));
+									fail = TRUE;
+								}
+							}
 						}
 						else
 							GST_LOG_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (current_state));
