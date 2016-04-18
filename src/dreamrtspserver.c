@@ -1074,7 +1074,12 @@ gboolean assert_state(App *app, GstElement *element, GstState state)
 {
 	GstStateChangeReturn sret;
 	GST_DEBUG_OBJECT(app, "setting %" GST_PTR_FORMAT"'s state to %s", element, gst_element_state_get_name (state));
+	GstState pipeline_state, current_state;
 	sret = gst_element_set_state (element, state);
+	gchar *elementname = gst_element_get_name(element);
+	gchar *dotfilename = g_strdup_printf ("assert_state_%s_to_%s_%i", elementname,gst_element_state_get_name (state), sret);
+	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, dotfilename);
+	g_free (elementname);
 	switch (sret) {
 		case GST_STATE_CHANGE_SUCCESS:
 		{
@@ -1088,33 +1093,47 @@ gboolean assert_state(App *app, GstElement *element, GstState state)
 		}
 		case GST_STATE_CHANGE_ASYNC:
 		{
+			watchdog_ping (app);
 			gboolean fail = FALSE;
-			GstState pipeline_state, current_state;
-			GST_TRACE_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"", element);
-			GstClockTime timeout = (element == app->pipeline) ? 4*GST_SECOND : GST_MSECOND;
-			gst_element_get_state (GST_ELEMENT(app->pipeline), &pipeline_state, NULL, timeout);
-			GST_TRACE_OBJECT(app, "GST_STATE_CHANGE_ASYNC got pipeline_state=%s", gst_element_state_get_name (state));
-			if (pipeline_state != state)
+			GST_LOG_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"", element);
+			GstClockTime timeout = /*(element == app->pipeline) ?*/ 4 * GST_SECOND/* : GST_MSECOND*/;
+			if (element == GST_ELEMENT(app->pipeline))
 			{
-				GValue item = G_VALUE_INIT;
-				GstIterator* iter = gst_bin_iterate_elements(GST_BIN(app->pipeline));
-				while (GST_ITERATOR_OK == gst_iterator_next(iter, (GValue*)&item))
+				gst_element_get_state (GST_ELEMENT(app->pipeline), &pipeline_state, NULL, timeout);
+				GST_LOG_OBJECT(app, "GST_STATE_CHANGE_ASYNC got pipeline_state=%s", gst_element_state_get_name (state));
+				if (pipeline_state != state)
 				{
-					GstElement *elem = g_value_get_object(&item);
-					gst_element_get_state (elem, &current_state, NULL, GST_MSECOND);
-					if (current_state != state && (element == app->pipeline || element == elem))
+					GValue item = G_VALUE_INIT;
+					GstIterator* iter = gst_bin_iterate_elements(GST_BIN(app->pipeline));
+					while (GST_ITERATOR_OK == gst_iterator_next(iter, (GValue*)&item))
 					{
-						GST_WARNING_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (current_state));
-						if (element == app->pipeline)
-							fail = TRUE;
+						GstElement *elem = g_value_get_object(&item);
+						gst_element_get_state (elem, &current_state, NULL, GST_MSECOND);
+						if (current_state != state && (element == app->pipeline || element == elem))
+						{
+							GST_WARNING_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (current_state));
+							if (element == app->pipeline)
+								fail = TRUE;
+						}
+						else
+							GST_LOG_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (current_state));
 					}
-					else
-						GST_TRACE_OBJECT(app, "GST_STATE_CHANGE_ASYNC %" GST_PTR_FORMAT"'s state=%s", elem, gst_element_state_get_name (current_state));
+					gst_iterator_free(iter);
+					if (fail)
+					{
+						GST_ERROR_OBJECT (app, "pipeline didn't complete GST_STATE_CHANGE_ASYNC to %s within %" GST_TIME_FORMAT ", currently in %s", gst_element_state_get_name (state), GST_TIME_ARGS(timeout), gst_element_state_get_name (pipeline_state));
+						return FALSE;
+					}
 				}
-				gst_iterator_free(iter);
-				if (fail)
+			}
+			else
+			{
+				gst_element_get_state (element, &current_state, NULL, timeout);
+				if (current_state == state)
+					GST_LOG_OBJECT(app, "GST_STATE_CHANGE_ASYNC on setting %" GST_PTR_FORMAT"'s state to %s SUCCESSFUL!", element, gst_element_state_get_name (state));
+				else
 				{
-					GST_ERROR_OBJECT (app, "pipeline didn't complete GST_STATE_CHANGE_ASYNC to %s within %" GST_TIME_FORMAT ", currently in %s", gst_element_state_get_name (state), GST_TIME_ARGS(timeout), gst_element_state_get_name (pipeline_state));
+					GST_WARNING_OBJECT(app, "GST_STATE_CHANGE_ASYNC on setting %" GST_PTR_FORMAT"'s state to %s failed! now in %s", element, gst_element_state_get_name (state), gst_element_state_get_name (current_state));
 					return FALSE;
 				}
 			}
@@ -1539,7 +1558,7 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app)
 			send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_RUNNING));
 			if (app->hls_server->id_timeout)
 				g_source_remove (app->hls_server->id_timeout);
-			g_timeout_add_seconds (5*HLS_FRAGMENT_DURATION, (GSourceFunc) hls_client_timeout, app);
+			app->hls_server->id_timeout = g_timeout_add_seconds (5*HLS_FRAGMENT_DURATION, (GSourceFunc) hls_client_timeout, app);
 		}
 
 		buffer = soup_buffer_new_with_owner (g_mapped_file_get_contents (mapping),
@@ -1614,6 +1633,9 @@ static GstPadProbeReturn hls_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo 
 	h->queue = NULL;
 	h->hlssink = NULL;
 
+	if (h->id_timeout)
+		g_source_remove (h->id_timeout);
+
 	if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->rtsp_server->state == RTSP_STATE_DISABLED)
 		halt_source_pipeline(app);
 	GST_INFO ("HLS server unlinked!");
@@ -1648,6 +1670,8 @@ gboolean disable_hls_server(App *app)
 		GST_INFO("hls server disabled, soupserver unref'ed, set HLS_STATE_DISABLED");
 		return TRUE;
 	}
+	else
+		GST_INFO("hls server was in HLS_STATE_IDLE... can't disable");
 	return FALSE;
 }
 
@@ -1717,7 +1741,7 @@ gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar 
 		gst_bin_add_many (GST_BIN (app->pipeline), h->queue, h->hlssink,  NULL);
 		gst_element_link (h->queue, h->hlssink);
 
-		if (!assert_state (app, h->hlssink, GST_STATE_PLAYING) || !assert_state (app, h->queue, GST_STATE_PLAYING))
+		if (!assert_state (app, h->hlssink, GST_STATE_READY) || !assert_state (app, h->queue, GST_STATE_PLAYING))
 			goto fail;
 
 		GstPad *teepad, *sinkpad;
@@ -1864,11 +1888,7 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		gst_bin_add_many (GST_BIN (app->pipeline), r->tsrtspq, r->tsappsink,  NULL);
 		gst_element_link (r->tsrtspq, r->tsappsink);
 
-		GstState targetstate;
-		if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->hls_server->state == HLS_STATE_DISABLED)
-			targetstate = GST_STATE_READY;
-		else
-			targetstate = GST_STATE_PLAYING;
+		GstState targetstate = GST_STATE_READY;
 
 		if (!assert_state (app, r->tsappsink, targetstate) || !assert_state (app, r->aappsink, targetstate) || !assert_state (app, r->vappsink, targetstate))
 			goto fail;
@@ -1908,6 +1928,9 @@ gboolean enable_rtsp_server(App *app, const gchar *path, guint32 port, const gch
 		}
 		gst_object_unref (teepad);
 		gst_object_unref (sinkpad);
+
+		if (app->tcp_upstream->state != UPSTREAM_STATE_DISABLED || app->hls_server->state != HLS_STATE_DISABLED)
+			targetstate = GST_STATE_PLAYING;
 
 		if (!assert_state (app, app->pipeline, targetstate))
 			goto fail;
