@@ -1564,10 +1564,10 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app)
 		{
 			app->hls_server->state = HLS_STATE_RUNNING;
 			send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_RUNNING));
-			if (app->hls_server->id_timeout)
-				g_source_remove (app->hls_server->id_timeout);
-			app->hls_server->id_timeout = g_timeout_add_seconds (5*HLS_FRAGMENT_DURATION, (GSourceFunc) hls_client_timeout, app);
 		}
+		if (app->hls_server->id_timeout)
+			g_source_remove (app->hls_server->id_timeout);
+		app->hls_server->id_timeout = g_timeout_add_seconds (5*HLS_FRAGMENT_DURATION, (GSourceFunc) hls_client_timeout, app);
 
 		buffer = soup_buffer_new_with_owner (g_mapped_file_get_contents (mapping),
 						     g_mapped_file_get_length (mapping),
@@ -1646,6 +1646,7 @@ static GstPadProbeReturn hls_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo 
 
 	if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->rtsp_server->state == RTSP_STATE_DISABLED)
 		halt_source_pipeline(app);
+
 	GST_INFO ("HLS server unlinked!");
 
 	return GST_PAD_PROBE_REMOVE;
@@ -1674,6 +1675,11 @@ gboolean disable_hls_server(App *app)
 			g_free(h->hls_pass);
 		}
 		g_object_unref (h->soupserver);
+
+		GFile *tmp_dir_file = g_file_new_for_path (HLS_PATH);
+		_delete_dir_recursively (tmp_dir_file, NULL);
+		g_object_unref (tmp_dir_file);
+
 		DREAMRTSPSERVER_UNLOCK (app);
 		GST_INFO("hls server disabled, soupserver unref'ed, set HLS_STATE_DISABLED");
 		return TRUE;
@@ -1767,6 +1773,10 @@ gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar 
 
 		if (app->tcp_upstream->state == UPSTREAM_STATE_WAITING)
 			unpause_source_pipeline(app);
+
+		GstStateChangeReturn sret = gst_element_set_state (h->hlssink, GST_STATE_PLAYING);
+		GST_DEBUG_OBJECT(app, "explicitely bring hlssink to GST_STATE_PLAYING = %i", sret);
+
 		if (!assert_state (app, app->pipeline, GST_STATE_PLAYING))
 			goto fail;
 
@@ -2437,6 +2447,14 @@ gboolean quit_signal(gpointer loop)
 	return FALSE;
 }
 
+gboolean get_dot_graph (gpointer user_data)
+{
+	App *app = user_data;
+	GST_INFO_OBJECT(app, "caught SIGUSR1, saving pipeline graph...");
+	GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS (GST_BIN (app->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "dreamrtspserver-sigusr");
+	return TRUE;
+}
+
 int main (int argc, char *argv[])
 {
 	App app;
@@ -2480,7 +2498,8 @@ int main (int argc, char *argv[])
 	app.rtsp_server = create_rtsp_server(&app);
 
 	app.loop = g_main_loop_new (NULL, FALSE);
-	g_unix_signal_add(SIGINT, quit_signal, app.loop);
+	g_unix_signal_add (SIGINT, quit_signal, app.loop);
+	g_unix_signal_add (SIGUSR1, (GSourceFunc) get_dot_graph, &app);
 
 	g_main_loop_run (app.loop);
 
@@ -2499,10 +2518,6 @@ int main (int argc, char *argv[])
 	free(app.tcp_upstream);
 
 	destroy_pipeline(&app);
-
-	GFile *tmp_dir_file = g_file_new_for_path (HLS_PATH);
-	_delete_dir_recursively (tmp_dir_file, NULL);
-	g_object_unref (tmp_dir_file);
 
 	g_main_loop_unref (app.loop);
 

@@ -298,6 +298,7 @@ gboolean unpause_source_pipeline(App *app);
 gboolean destroy_pipeline(App *app);
 gboolean watchdog_ping(gpointer user_data);
 gboolean quit_signal(gpointer loop);
+gboolean get_dot_graph (gpointer user_data);
 
 DreamHLSserver *create_hls_server(App *app);
 gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar *pass);
