@@ -302,6 +302,8 @@ gboolean get_dot_graph (gpointer user_data);
 
 DreamHLSserver *create_hls_server(App *app);
 gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar *pass);
+gboolean start_hls_pipeline(App *app);
+gboolean stop_hls_pipeline(App *app);
 gboolean disable_hls_server(App *app);
 gboolean hls_client_timeout (gpointer user_data);
 static void soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app);

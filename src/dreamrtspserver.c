@@ -1477,11 +1477,10 @@ out:
 gboolean hls_client_timeout (gpointer user_data)
 {
 	App *app = user_data;
-	GST_INFO_OBJECT(app, "HLS clients stopped downloading, going into IDLE");
 	if (app->hls_server)
 	{
-		app->hls_server->state = HLS_STATE_IDLE;
-		send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_IDLE));
+		GST_INFO_OBJECT(app, "HLS clients stopped downloading, stopping hls pipeline!");
+		stop_hls_pipeline (app);
 	}
 	return FALSE;
 }
@@ -1503,8 +1502,23 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app)
 		else
 			hlspath = g_strdup_printf ("%s%s", HLS_PATH, path);
 	}
-
-	if (status_code == SOUP_STATUS_NONE && stat (hlspath, &st) == -1) {
+	if (app->hls_server->state == HLS_STATE_IDLE && g_strcmp0 (path+1, HLS_PLAYLIST_NAME) == 0)
+	{
+		DREAMRTSPSERVER_LOCK (app);
+		GST_INFO_OBJECT (server, "client requested '%s' but we're idle... start pipeline!", path+1);
+		if (!start_hls_pipeline (app))
+			status_code = SOUP_STATUS_INTERNAL_SERVER_ERROR;
+		else
+		{
+			GstState state;
+			gst_element_get_state (GST_ELEMENT(app->pipeline), &state, NULL, HLS_FRAGMENT_DURATION);
+			g_usleep (G_USEC_PER_SEC * (HLS_FRAGMENT_DURATION+1));
+			app->hls_server->state = HLS_STATE_RUNNING;
+			send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_RUNNING));
+		}
+		DREAMRTSPSERVER_UNLOCK (app);
+	}
+	else if (status_code == SOUP_STATUS_NONE && stat (hlspath, &st) == -1) {
 		if (errno == EPERM)
 			status_code = SOUP_STATUS_FORBIDDEN;
 		else if (errno == ENOENT)
@@ -1558,12 +1572,6 @@ soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app)
 				}
 			}
 			soup_message_headers_set_content_type (msg->response_headers, "application/x-mpegURL", NULL);
-		}
-
-		if (app->hls_server->state == HLS_STATE_IDLE)
-		{
-			app->hls_server->state = HLS_STATE_RUNNING;
-			send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_RUNNING));
 		}
 		if (app->hls_server->id_timeout)
 			g_source_remove (app->hls_server->id_timeout);
@@ -1644,7 +1652,7 @@ static GstPadProbeReturn hls_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo 
 	if (h->id_timeout)
 		g_source_remove (h->id_timeout);
 
-	if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && app->rtsp_server->state == RTSP_STATE_DISABLED)
+	if (app->tcp_upstream->state == UPSTREAM_STATE_DISABLED && g_list_length (app->rtsp_server->clients_list) == 0)
 		halt_source_pipeline(app);
 
 	GST_INFO ("HLS server unlinked!");
@@ -1652,21 +1660,39 @@ static GstPadProbeReturn hls_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo 
 	return GST_PAD_PROBE_REMOVE;
 }
 
-gboolean disable_hls_server(App *app)
+gboolean stop_hls_pipeline(App *app)
 {
-	GST_INFO_OBJECT(app, "disable_hls_server");
+	GST_INFO_OBJECT(app, "stop_hls_pipeline");
 	DreamHLSserver *h = app->hls_server;
-	if (h->state >= HLS_STATE_IDLE)
+	if (h->state == HLS_STATE_RUNNING)
 	{
 		DREAMRTSPSERVER_LOCK (app);
-		h->state = HLS_STATE_DISABLED;
-		send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_DISABLED));
+		h->state = HLS_STATE_IDLE;
+		send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_IDLE));
 		gst_object_ref (h->queue);
 		gst_object_ref (h->hlssink);
 		GstPad *sinkpad;
 		sinkpad = gst_element_get_static_pad (h->queue, "sink");
 		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, hls_pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);
+		DREAMRTSPSERVER_UNLOCK (app);
+		GST_INFO("hls server pipeline stopped, set HLS_STATE_IDLE");
+		return TRUE;
+	}
+	else
+		GST_INFO("hls server wasn't in HLS_STATE_RUNNING... can't stop");
+	return FALSE;
+}
+
+gboolean disable_hls_server(App *app)
+{
+	GST_INFO_OBJECT(app, "disable_hls_server");
+	DreamHLSserver *h = app->hls_server;
+	if (h->state == HLS_STATE_RUNNING)
+		stop_hls_pipeline (app);
+	if (h->state == HLS_STATE_IDLE)
+	{
+		DREAMRTSPSERVER_LOCK (app);
 		soup_server_quit (h->soupserver);
 		if (h->soupauthdomain)
 		{
@@ -1675,17 +1701,17 @@ gboolean disable_hls_server(App *app)
 			g_free(h->hls_pass);
 		}
 		g_object_unref (h->soupserver);
-
 		GFile *tmp_dir_file = g_file_new_for_path (HLS_PATH);
 		_delete_dir_recursively (tmp_dir_file, NULL);
 		g_object_unref (tmp_dir_file);
-
+		h->state = HLS_STATE_DISABLED;
+		send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_DISABLED));
 		DREAMRTSPSERVER_UNLOCK (app);
-		GST_INFO("hls server disabled, soupserver unref'ed, set HLS_STATE_DISABLED");
+		GST_INFO("hls soupserver unref'ed, set HLS_STATE_DISABLED");
 		return TRUE;
 	}
 	else
-		GST_INFO("hls server was in HLS_STATE_IDLE... can't disable");
+		GST_INFO("hls server in wrong state... can't disable");
 	return FALSE;
 }
 
@@ -1726,59 +1752,12 @@ gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar 
 
 	if (h->state == HLS_STATE_DISABLED)
 	{
-		assert_tsmux (app);
-
 		int r = mkdir (HLS_PATH, DEFFILEMODE);
 		if (r == -1 && errno != EEXIST)
 		{
 			g_error ("Failed to create HLS server directory '%s': %s (%i)", HLS_PATH, strerror(errno), errno);
 			goto fail;
 		}
-
-		h->queue = gst_element_factory_make ("queue", "hlsqueue");
-		h->hlssink = gst_element_factory_make ("hlssink", "hlssink");
-		if (!(h->hlssink && h->queue))
-		{
-			g_error ("Failed to create HLS pipeline element(s):%s%s", h->hlssink?"":" hlssink", h->queue?"":" queue");
-			goto fail;
-		}
-
-		gchar *frag_location, *playlist_location;
-		frag_location = g_strdup_printf ("%s/%s", HLS_PATH, HLS_FRAGMENT_NAME);
-		playlist_location = g_strdup_printf ("%s/%s", HLS_PATH, HLS_PLAYLIST_NAME);
-
-		g_object_set (G_OBJECT (h->hlssink), "target-duration", HLS_FRAGMENT_DURATION, NULL);
-		g_object_set (G_OBJECT (h->hlssink), "location", frag_location, NULL);
-		g_object_set (G_OBJECT (h->hlssink), "playlist-location", playlist_location, NULL);
-		g_object_set (G_OBJECT (h->queue), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
-
-		gst_bin_add_many (GST_BIN (app->pipeline), h->queue, h->hlssink,  NULL);
-		gst_element_link (h->queue, h->hlssink);
-
-		if (!assert_state (app, h->hlssink, GST_STATE_READY) || !assert_state (app, h->queue, GST_STATE_PLAYING))
-			goto fail;
-
-		GstPad *teepad, *sinkpad;
-		GstPadLinkReturn ret;
-		teepad = gst_element_get_request_pad (app->tstee, "src_%u");
-		sinkpad = gst_element_get_static_pad (h->queue, "sink");
-		ret = gst_pad_link (teepad, sinkpad);
-		if (ret != GST_PAD_LINK_OK)
-		{
-			GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", teepad, sinkpad);
-			goto fail;
-		}
-		gst_object_unref (teepad);
-		gst_object_unref (sinkpad);
-
-		if (app->tcp_upstream->state == UPSTREAM_STATE_WAITING)
-			unpause_source_pipeline(app);
-
-		GstStateChangeReturn sret = gst_element_set_state (h->hlssink, GST_STATE_PLAYING);
-		GST_DEBUG_OBJECT(app, "explicitely bring hlssink to GST_STATE_PLAYING = %i", sret);
-
-		if (!assert_state (app, app->pipeline, GST_STATE_PLAYING))
-			goto fail;
 
 		h->port = port;
 		h->soupserver = soup_server_new (SOUP_SERVER_PORT, h->port, SOUP_SERVER_SERVER_HEADER, "dreamhttplive", NULL);
@@ -1806,22 +1785,11 @@ gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar 
 
 		GST_INFO_OBJECT (h->soupserver, "SOUP HLS server ready at http://%s127.0.0.1:%i/%s ...", credentials, soup_server_get_port (h->soupserver), HLS_PLAYLIST_NAME);
 
-/*		GstPad *pad = gst_element_get_static_pad (app->vparse, "src");
-		gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER|GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) _detect_keyframes_probe, app, NULL);
-		gst_object_unref (pad);
-		pad = gst_element_get_static_pad (app->vsrc, "src");
-		gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER|GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) _detect_keyframes_probe, app, NULL);
-		gst_object_unref (pad);
-		GstPad *pad2 = gst_element_get_static_pad (h->hlssink, "sink");
-		gst_pad_add_probe (pad2, GST_PAD_PROBE_TYPE_BUFFER|GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) _detect_keyframes_probe, app, NULL);
-		gst_object_unref (pad2);
-*/
 		h->state = HLS_STATE_IDLE;
 		send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_IDLE));
 		GST_DEBUG ("set HLS_STATE_IDLE");
 		g_free (credentials);
 		DREAMRTSPSERVER_UNLOCK (app);
-		GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"enable_hls_server");
 		return TRUE;
 	}
 	else
@@ -1834,6 +1802,71 @@ fail:
 	disable_hls_server(app);
 	return FALSE;
 
+}
+
+gboolean start_hls_pipeline(App* app)
+{
+	GST_DEBUG_OBJECT (app, "start_hls_pipeline");
+
+	DreamHLSserver *h = app->hls_server;
+	if (h->state == HLS_STATE_DISABLED)
+	{
+		GST_ERROR_OBJECT (app, "failed to start hls pipeline because hls server is not enabled!");
+		return FALSE;
+	}
+
+	assert_tsmux (app);
+
+	h->queue = gst_element_factory_make ("queue", "hlsqueue");
+	h->hlssink = gst_element_factory_make ("hlssink", "hlssink");
+	if (!(h->hlssink && h->queue))
+	{
+		g_error ("Failed to create HLS pipeline element(s):%s%s", h->hlssink?"":" hlssink", h->queue?"":" queue");
+		return FALSE;
+	}
+
+	gchar *frag_location, *playlist_location;
+	frag_location = g_strdup_printf ("%s/%s", HLS_PATH, HLS_FRAGMENT_NAME);
+	playlist_location = g_strdup_printf ("%s/%s", HLS_PATH, HLS_PLAYLIST_NAME);
+
+	g_object_set (G_OBJECT (h->hlssink), "target-duration", HLS_FRAGMENT_DURATION, NULL);
+	g_object_set (G_OBJECT (h->hlssink), "location", frag_location, NULL);
+	g_object_set (G_OBJECT (h->hlssink), "playlist-location", playlist_location, NULL);
+	g_object_set (G_OBJECT (h->queue), "leaky", 2, "max-size-buffers", 0, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(5)*GST_SECOND, NULL);
+
+	gst_bin_add_many (GST_BIN (app->pipeline), h->queue, h->hlssink,  NULL);
+	gst_element_link (h->queue, h->hlssink);
+
+	if (!assert_state (app, h->hlssink, GST_STATE_READY) || !assert_state (app, h->queue, GST_STATE_PLAYING))
+		return FALSE;
+
+	GstPad *teepad, *sinkpad;
+	GstPadLinkReturn ret;
+	teepad = gst_element_get_request_pad (app->tstee, "src_%u");
+	sinkpad = gst_element_get_static_pad (h->queue, "sink");
+	ret = gst_pad_link (teepad, sinkpad);
+	if (ret != GST_PAD_LINK_OK)
+	{
+		GST_ERROR_OBJECT (app, "couldn't link %" GST_PTR_FORMAT " ! %" GST_PTR_FORMAT "", teepad, sinkpad);
+		return FALSE;
+	}
+	gst_object_unref (teepad);
+	gst_object_unref (sinkpad);
+
+	if (app->tcp_upstream->state == UPSTREAM_STATE_WAITING)
+		unpause_source_pipeline(app);
+
+	GstStateChangeReturn sret = gst_element_set_state (h->hlssink, GST_STATE_PLAYING);
+	GST_DEBUG_OBJECT(app, "explicitely bring hlssink to GST_STATE_PLAYING = %i", sret);
+
+	if (!assert_state (app, app->pipeline, GST_STATE_PLAYING))
+	{
+		GST_ERROR_OBJECT (app, "GST_STATE_CHANGE_FAILURE for hls pipeline");
+		return FALSE;
+	}
+
+	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(app->pipeline),GST_DEBUG_GRAPH_SHOW_ALL,"start_hls_server");
+	return TRUE;
 }
 
 DreamHLSserver *create_hls_server(App *app)
@@ -2155,7 +2188,7 @@ gboolean halt_source_pipeline(App* app)
 
 gboolean pause_source_pipeline(App* app)
 {
-	if (app->rtsp_server->state <= RTSP_STATE_IDLE && app->hls_server->state == RTSP_STATE_DISABLED)
+	if (app->rtsp_server->state <= RTSP_STATE_IDLE && app->hls_server->state == HLS_STATE_DISABLED)
 	{
 		GST_INFO_OBJECT(app, "pause_source_pipeline... setting sources to GST_STATE_PAUSED rtsp_server->state=%i hls_server->state=%i", app->rtsp_server->state, app->hls_server->state);
 		if (gst_element_set_state (app->asrc, GST_STATE_PAUSED) != GST_STATE_CHANGE_NO_PREROLL || gst_element_set_state (app->vsrc, GST_STATE_PAUSED) != GST_STATE_CHANGE_NO_PREROLL)
