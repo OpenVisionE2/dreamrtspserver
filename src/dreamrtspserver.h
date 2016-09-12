@@ -286,10 +286,9 @@ gboolean upstream_keep_alive(App *app);
 gboolean upstream_set_waiting(App *app);
 gboolean upstream_resume_transmitting(App *app);
 static GstPadProbeReturn inject_authorization (GstPad * sinkpad, GstPadProbeInfo * info, gpointer user_data);
-static GstPadProbeReturn pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data);
 static void queue_underrun (GstElement *, gpointer);
 static void queue_overrun (GstElement *, gpointer);
-gboolean auto_adjust_bitrate(App *app);
+static void auto_adjust_bitrate(App *app);
 
 gboolean create_source_pipeline(App *app);
 gboolean halt_source_pipeline(App *app);

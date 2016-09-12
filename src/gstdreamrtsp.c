@@ -27,9 +27,6 @@ GST_DEBUG_CATEGORY_STATIC (rtsp_server_debug);
 
 static void gst_dream_rtsp_client_class_init (GstDreamRTSPClientClass * klass)
 {
-	GObjectClass *gobject_class;
-	GstRTSPClientClass *rtsp_client_class = GST_RTSP_CLIENT_CLASS (klass);
-
 	GST_DEBUG_CATEGORY_INIT (rtsp_server_debug, "dreamrtspserver",
 			GST_DEBUG_BOLD | GST_DEBUG_FG_YELLOW | GST_DEBUG_BG_BLUE,
 			"Dreambox RTSP server daemon");
@@ -68,7 +65,6 @@ static void gst_dream_rtsp_server_class_init (GstDreamRTSPServerClass * klass)
 
 static GstRTSPClient *gst_dream_rtsp_create_client (GstRTSPServer * server)
 {
-	GstDreamRTSPServer *dream_rtsp_server = GST_DREAM_RTSP_SERVER (server);
 	GstDreamRTSPClient *client;
 	client = g_object_new(GST_TYPE_DREAM_RTSP_CLIENT, NULL);
 	
@@ -96,7 +92,6 @@ static GstRTSPClient *gst_dream_rtsp_create_client (GstRTSPServer * server)
 
 static void gst_dream_rtsp_server_finalize (GObject * object)
 {
-	GstDreamRTSPServer *server = GST_DREAM_RTSP_SERVER (object);
 	GST_DEBUG_OBJECT (object, "finalize server");
 	G_OBJECT_CLASS (gst_dream_rtsp_server_parent_class)->finalize (object);
 }

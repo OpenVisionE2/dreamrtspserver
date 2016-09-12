@@ -59,7 +59,8 @@ static gboolean gst_set_inputmode(App *app, inputMode input_mode)
 
 static gboolean gst_set_framerate(App *app, int value)
 {
-	GstCaps *oldcaps, *newcaps;
+	GstCaps *oldcaps = NULL;
+	GstCaps *newcaps = NULL;
 	GstStructure *structure;
 	gboolean ret = FALSE;
 
@@ -96,7 +97,8 @@ out:
 
 static gboolean gst_set_resolution(App *app, int width, int height)
 {
-	GstCaps *oldcaps, *newcaps;
+	GstCaps *oldcaps = NULL;
+	GstCaps *newcaps = NULL;
 	GstStructure *structure;
 	gboolean ret = FALSE;
 
@@ -166,7 +168,7 @@ static gboolean gst_get_capsprop(App *app, GstElement *element, const gchar* pro
 	}
 	else if ((g_strcmp0 (prop_name, "width") == 0 || g_strcmp0 (prop_name, "height") == 0) && value)
 	{
-		if (!gst_structure_get_int (structure, prop_name, (guint*)value))
+		if (!gst_structure_get_uint(structure, prop_name, value))
 			*value = 0;
 	}
 	else
@@ -474,7 +476,7 @@ static void handle_method_call (GDBusConnection       *connection,
 			guint32 upstream_port;
 
 			g_variant_get (parameters, "(b&su&s)", &state, &upstream_host, &upstream_port, &token);
-			GST_DEBUG("app->pipeline=%p, enableUpstream state=%i host=%s port=%i token=%s (currently in state %s)", app->pipeline, state, upstream_host, upstream_port, token, app->tcp_upstream->state);
+			GST_DEBUG("app->pipeline=%p, enableUpstream state=%i host=%s port=%i token=%s (currently in state %u)", app->pipeline, state, upstream_host, upstream_port, token, app->tcp_upstream->state);
 
 			if (state == TRUE && app->tcp_upstream->state == UPSTREAM_STATE_DISABLED)
 				result = enable_tcp_upstream(app, upstream_host, upstream_port, token);
@@ -655,7 +657,7 @@ static void media_unprepare (GstRTSPMedia * media, gpointer user_data)
 	else if (media == r->ts_media)
 	{
 		r->ts_media = NULL;
-		r->ts_appsrc = r->ts_appsrc = NULL;
+		r->ts_appsrc = NULL;
 	}
 	if (!r->es_media && !r->ts_media)
 	{
@@ -738,8 +740,8 @@ static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo
 {
 	App *app = user_data;
 	DreamTCPupstream *t = app->tcp_upstream;
-	if (info->type & GST_PAD_PROBE_TYPE_BUFFER      && GST_IS_BUFFER     (GST_PAD_PROBE_INFO_BUFFER (info)) ||
-	    info->type & GST_PAD_PROBE_TYPE_BUFFER_LIST && gst_buffer_list_length(GST_PAD_PROBE_INFO_BUFFER_LIST (info)))
+	if (((info->type & GST_PAD_PROBE_TYPE_BUFFER) && GST_IS_BUFFER(GST_PAD_PROBE_INFO_BUFFER(info))) ||
+	     ((info->type & GST_PAD_PROBE_TYPE_BUFFER_LIST) && gst_buffer_list_length(GST_PAD_PROBE_INFO_BUFFER_LIST(info))))
 	{
 		QUEUE_DEBUG;
 		GST_LOG_OBJECT (app, "cancel upstream_set_waiting timeout because data flow was restored! queue properties current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "",
@@ -756,7 +758,7 @@ static GstPadProbeReturn cancel_waiting_probe (GstPad * sinkpad, GstPadProbeInfo
 		return GST_PAD_PROBE_REMOVE;
 	}
 	else
-		GST_WARNING_OBJECT (app, "probed unhandled % "GST_PTR_FORMAT ", dataflow not restored?", info->data);
+		GST_WARNING_OBJECT(app, "probed unhandled %" GST_PTR_FORMAT ", dataflow not restored?", info->data);
 	return GST_PAD_PROBE_OK;
 }
 
@@ -765,7 +767,7 @@ static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInf
 	App *app = user_data;
 	DreamTCPupstream *t = app->tcp_upstream;
 	GstClockTime now = gst_clock_get_time (app->clock);
-	GstBuffer *buffer;
+	GstBuffer *buffer = NULL;
 	guint idx = 0, num_buffers = 1;
 	do {
 		if (info->type & GST_PAD_PROBE_TYPE_BUFFER)
@@ -784,7 +786,7 @@ static GstPadProbeReturn bitrate_measure_probe (GstPad * sinkpad, GstPadProbeInf
 	} while (idx < num_buffers);
 
 	QUEUE_DEBUG;
-	GST_TRACE_OBJECT (app, "probetype=%i num_buffers=%i data=% "GST_PTR_FORMAT " size was=%zu bitrate_sum=%zu now=%" GST_TIME_FORMAT " avg at %" GST_TIME_FORMAT " queue properties current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "",
+	GST_TRACE_OBJECT(app, "probetype=%i num_buffers=%i data=%" GST_PTR_FORMAT " size was=%zu bitrate_sum=%zu now=%" GST_TIME_FORMAT " avg at %" GST_TIME_FORMAT " queue properties current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT "",
 			info->type, num_buffers, info->data, gst_buffer_get_size (buffer), t->bitrate_sum, GST_TIME_ARGS(now), GST_TIME_ARGS(t->measure_start+BITRATE_AVG_PERIOD), cur_bytes, cur_buf, GST_TIME_ARGS(cur_time));
 	if (now > t->measure_start+BITRATE_AVG_PERIOD)
 	{
@@ -896,7 +898,7 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 	if (queue == t->tstcpq/* && app->rtsp_server->state != RTSP_STATE_IDLE*/) //!!!TODO
 	{
 		QUEUE_DEBUG;
-		GST_DEBUG_OBJECT (app, "% "GST_PTR_FORMAT " overrun! properties: current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT " rtsp_server->state=%i", queue, cur_bytes, cur_buf, GST_TIME_ARGS(cur_time), app->rtsp_server->state);
+		GST_DEBUG_OBJECT(app, "%" GST_PTR_FORMAT " overrun! properties: current-level-bytes=%d current-level-buffers=%d current-level-time=%" GST_TIME_FORMAT " rtsp_server->state=%i", queue, cur_bytes, cur_buf, GST_TIME_ARGS(cur_time), app->rtsp_server->state);
 		GstClockTime now = gst_clock_get_time (app->clock);
 		if (t->state == UPSTREAM_STATE_CONNECTING)
 		{
@@ -987,16 +989,15 @@ static void queue_overrun (GstElement * queue, gpointer user_data)
 	DREAMRTSPSERVER_UNLOCK (app);
 }
 
-gboolean auto_adjust_bitrate(App *app)
+static void auto_adjust_bitrate(App *app)
 {
 	DreamTCPupstream *t = app->tcp_upstream;
 	get_source_properties (app);
 	SourceProperties *p = &app->source_properties;
 	GST_DEBUG_OBJECT (app, "auto overload handling: reduce bitrate from audioBitrate=%i videoBitrate=%i to fit network bandwidth=%i kbit/s", p->audioBitrate, p->videoBitrate, t->bitrate_avg);
-	gint newAudioBitrate, newVideoBitrate;
 	if (p->audioBitrate > 96)
 		p->audioBitrate = p->audioBitrate*0.8;
-	p->videoBitrate = (t->bitrate_avg-newAudioBitrate)*0.8;
+	p->videoBitrate = (t->bitrate_avg - p->audioBitrate) * 0.8;
 	GST_INFO_OBJECT (app, "auto overload handling: newAudioBitrate=%i newVideoBitrate=%i newTotalBitrate~%i kbit/s", p->audioBitrate, p->videoBitrate, p->audioBitrate+p->videoBitrate);
 	apply_source_properties(app);
 	if (t->id_signal_waiting)
@@ -1023,7 +1024,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 		GstBuffer *buffer = gst_sample_get_buffer (sample);
 		GstCaps *caps = gst_sample_get_caps (sample);
 
-		GST_LOG_OBJECT(appsink, "% "GST_PTR_FORMAT" @ %"GST_PTR_FORMAT"", buffer, appsrc);
+		GST_LOG_OBJECT(appsink, "%" GST_PTR_FORMAT" @ %" GST_PTR_FORMAT, buffer, appsrc);
 		if (r->rtsp_start_pts == GST_CLOCK_TIME_NONE) {
 			if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
 			{
@@ -1296,7 +1297,6 @@ gboolean create_source_pipeline(App *app)
 
 static void encoder_signal_lost (GstElement *dreamaudiosource, gpointer user_data)
 {
-	App *app = user_data;
 	GST_INFO_OBJECT (dreamaudiosource, "lost encoder signal!");
 }
 
@@ -1348,7 +1348,7 @@ gboolean enable_tcp_upstream(App *app, const gchar *upstream_host, guint32 upstr
 		g_object_set (G_OBJECT (t->tstcpq), "leaky", 2, "max-size-buffers", 400, "max-size-bytes", 0, "max-size-time", G_GINT64_CONSTANT(0), NULL);
 
 		t->id_signal_overrun = g_signal_connect (t->tstcpq, "overrun", G_CALLBACK (queue_overrun), app);
-		GST_TRACE_OBJECT (app, "installed %" GST_PTR_FORMAT " overrun handler id=%lu", t->tstcpq, t->id_signal_overrun);
+		GST_TRACE_OBJECT(app, "installed %" GST_PTR_FORMAT " overrun handler id=%u", t->tstcpq, t->id_signal_overrun);
 
 		g_object_set (t->tcpsink, "max-lateness", G_GINT64_CONSTANT(3)*GST_SECOND, NULL);
 		g_object_set (t->tcpsink, "blocksize", BLOCK_SIZE, NULL);
@@ -1488,7 +1488,6 @@ gboolean hls_client_timeout (gpointer user_data)
 static void
 soup_do_get (SoupServer *server, SoupMessage *msg, const char *path, App *app)
 {
-	char *slash;
 	gchar *hlspath = NULL;
 	guint status_code = SOUP_STATUS_NONE;
 	struct stat st;
@@ -1620,7 +1619,7 @@ static GstPadProbeReturn hls_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo 
 
 	GstElement *element = gst_pad_get_parent_element(pad);
 
-	GST_DEBUG_OBJECT (pad, "unlink... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, h->hlssink);
+	GST_DEBUG_OBJECT(pad, "unlink... %" GST_PTR_FORMAT " and %" GST_PTR_FORMAT, element, h->hlssink);
 
 	GstPad *teepad;
 	teepad = gst_pad_get_peer(pad);
@@ -1633,16 +1632,16 @@ static GstPadProbeReturn hls_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo 
 
 	gst_element_unlink (element, h->hlssink);
 
-	GST_DEBUG_OBJECT (pad, "remove... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, h->hlssink);
+	GST_DEBUG_OBJECT(pad, "remove... %" GST_PTR_FORMAT " and %" GST_PTR_FORMAT, element, h->hlssink);
 
 	gst_bin_remove_many (GST_BIN (app->pipeline), element, h->hlssink, NULL);
 
-	GST_DEBUG_OBJECT (pad, "set state null %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, h->hlssink);
+	GST_DEBUG_OBJECT(pad, "set state null %" GST_PTR_FORMAT " and %" GST_PTR_FORMAT, element, h->hlssink);
 
 	gst_element_set_state (h->hlssink, GST_STATE_NULL);
 	gst_element_set_state (element, GST_STATE_NULL);
 
-	GST_DEBUG_OBJECT (pad, "unref.... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, h->hlssink);
+	GST_DEBUG_OBJECT(pad, "unref.... %" GST_PTR_FORMAT " and %" GST_PTR_FORMAT, element, h->hlssink);
 
 	gst_object_unref (element);
 	gst_object_unref (h->hlssink);
@@ -1715,6 +1714,7 @@ gboolean disable_hls_server(App *app)
 	return FALSE;
 }
 
+#if 0
 static GstPadProbeReturn _detect_keyframes_probe (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
 {
 	App *app = user_data;
@@ -1737,6 +1737,7 @@ static GstPadProbeReturn _detect_keyframes_probe (GstPad * pad, GstPadProbeInfo 
 	} while (idx < num_buffers);
 	return GST_PAD_PROBE_OK;
 }
+#endif
 
 gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar *pass)
 {
@@ -2094,7 +2095,7 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 	App *app = user_data;
 
 	GstElement *element = gst_pad_get_parent_element(pad);
-	GST_DEBUG_OBJECT (pad, "tsmux_pad_probe_unlink_cb % "GST_PTR_FORMAT, element);
+	GST_DEBUG_OBJECT(pad, "tsmux_pad_probe_unlink_cb %" GST_PTR_FORMAT, element);
 
 	GstElement *source = NULL;
 	if (element == app->aq)
@@ -2117,7 +2118,7 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 
 	if (gst_element_set_state (source, GST_STATE_NULL) != GST_STATE_CHANGE_SUCCESS)
 	{
-		GST_ERROR_OBJECT (pad, "can't set % " GST_PTR_FORMAT "'s state to GST_STATE_NULL", source);
+		GST_ERROR_OBJECT(pad, "can't set %" GST_PTR_FORMAT "'s state to GST_STATE_NULL", source);
 		goto fail;
 	}
 
@@ -2126,13 +2127,13 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 	muxpad = gst_pad_get_peer (srcpad);
 	if (GST_IS_PAD (muxpad))
 	{
-		GST_DEBUG_OBJECT (pad, "srcpad % " GST_PTR_FORMAT " muxpad % "GST_PTR_FORMAT" tsmux % "GST_PTR_FORMAT, srcpad, muxpad, app->tsmux);
+		GST_DEBUG_OBJECT(pad, "srcpad %" GST_PTR_FORMAT " muxpad %" GST_PTR_FORMAT " tsmux %" GST_PTR_FORMAT, srcpad, muxpad, app->tsmux);
 		gst_pad_unlink (srcpad, muxpad);
 		gst_element_release_request_pad (app->tsmux, muxpad);
 		gst_object_unref (muxpad);
 	}
 	else
-		GST_DEBUG_OBJECT (pad, "srcpad % " GST_PTR_FORMAT "'s peer was already unreffed");
+		GST_DEBUG_OBJECT(pad, "srcpad %" GST_PTR_FORMAT "'s peer was already unreffed", srcpad);
 	gst_object_unref (srcpad);
 
 	gst_element_set_state (element, GST_STATE_READY);
@@ -2162,7 +2163,7 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 	}
 	if (GST_IS_PAD(sinkpad) && GST_IS_ELEMENT(nextelem))
 	{
-		GST_DEBUG_OBJECT (pad, "element % " GST_PTR_FORMAT " is now in GST_STATE_READY, installing idle probe on % "GST_PTR_FORMAT"", element, sinkpad);
+		GST_DEBUG_OBJECT(pad, "element %" GST_PTR_FORMAT " is now in GST_STATE_READY, installing idle probe on %" GST_PTR_FORMAT, element, sinkpad);
 		gst_object_ref (nextelem);
 		gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_IDLE, tsmux_pad_probe_unlink_cb, app, NULL);
 		gst_object_unref (sinkpad);
@@ -2264,7 +2265,7 @@ static GstPadProbeReturn rtsp_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo
 	DreamRTSPserver *r = app->rtsp_server;
 
 	GstElement *element = gst_pad_get_parent_element(pad);
-	GstElement *appsink;
+	GstElement *appsink = NULL;
 	if (element == r->vrtspq)
 		appsink = r->vappsink;
 	else if (element == r->artspq)
@@ -2272,7 +2273,7 @@ static GstPadProbeReturn rtsp_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo
 	else if (element == r->tsrtspq)
 		appsink = r->tsappsink;
 
-	GST_DEBUG_OBJECT (pad, "unlink... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, appsink);
+	GST_DEBUG_OBJECT(pad, "unlink... %" GST_PTR_FORMAT " and %" GST_PTR_FORMAT, element, appsink);
 
 	GstPad *teepad;
 	teepad = gst_pad_get_peer(pad);
@@ -2285,16 +2286,16 @@ static GstPadProbeReturn rtsp_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInfo
 
 	gst_element_unlink (element, appsink);
 
-	GST_DEBUG_OBJECT (pad, "remove... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, appsink);
+	GST_DEBUG_OBJECT(pad, "remove... %" GST_PTR_FORMAT " and %" GST_PTR_FORMAT, element, appsink);
 
 	gst_bin_remove_many (GST_BIN (app->pipeline), element, appsink, NULL);
 
-	GST_DEBUG_OBJECT (pad, "set state null %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, appsink);
+	GST_DEBUG_OBJECT(pad, "set state null %" GST_PTR_FORMAT " and %" GST_PTR_FORMAT, element, appsink);
 
 	gst_element_set_state (appsink, GST_STATE_NULL);
 	gst_element_set_state (element, GST_STATE_NULL);
 
-	GST_DEBUG_OBJECT (pad, "unref.... %" GST_PTR_FORMAT " and % "GST_PTR_FORMAT, element, appsink);
+	GST_DEBUG_OBJECT(pad, "unref.... %" GST_PTR_FORMAT " and %" GST_PTR_FORMAT, element, appsink);
 
 	gst_object_unref (element);
 	gst_object_unref (appsink);
@@ -2368,7 +2369,6 @@ static GstPadProbeReturn upstream_pad_probe_unlink_cb (GstPad * pad, GstPadProbe
 {
 	App *app = user_data;
 	DreamTCPupstream *t = app->tcp_upstream;
-	GstPadProbeReturn ret;
 
 	GstElement *element = gst_pad_get_parent_element(pad);
 
