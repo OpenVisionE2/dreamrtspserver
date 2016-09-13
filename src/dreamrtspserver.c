@@ -42,6 +42,9 @@ static gboolean gst_set_inputmode(App *app, inputMode input_mode)
 {
 	if (!app->pipeline)
 		return FALSE;
+	if (!GST_IS_ELEMENT(app->asrc) ||
+	    !GST_IS_ELEMENT(app->vsrc))
+		return FALSE;
 
 	g_object_set (G_OBJECT (app->asrc), "input_mode", input_mode, NULL);
 	g_object_set (G_OBJECT (app->vsrc), "input_mode", input_mode, NULL);
@@ -65,12 +68,13 @@ static gboolean gst_set_framerate(App *app, int value)
 	gboolean ret = FALSE;
 
 	if (!app->pipeline)
-		goto out;
+		return FALSE;
+	if (!GST_IS_ELEMENT(app->vsrc))
+		return FALSE;
 
 	g_object_get (G_OBJECT (app->vsrc), "caps", &oldcaps, NULL);
-
 	if (!GST_IS_CAPS(oldcaps))
-		goto out;
+		return FALSE;
 
 	GST_DEBUG("set framerate %d fps... old caps %" GST_PTR_FORMAT, value, oldcaps);
 
@@ -103,12 +107,13 @@ static gboolean gst_set_resolution(App *app, int width, int height)
 	gboolean ret = FALSE;
 
 	if (!app->pipeline)
-		goto out;
+		return FALSE;
+	if (!GST_IS_ELEMENT(app->vsrc))
+		return FALSE;
 
 	g_object_get (G_OBJECT (app->vsrc), "caps", &oldcaps, NULL);
-
 	if (!GST_IS_CAPS(oldcaps))
-		goto out;
+		return FALSE;
 
 	GST_DEBUG("set new resolution %ix%i... old caps %" GST_PTR_FORMAT, width, height, oldcaps);
 
@@ -142,14 +147,15 @@ static gboolean gst_get_capsprop(App *app, GstElement *element, const gchar* pro
 	gboolean ret = FALSE;
 
 	if (!app->pipeline)
-		goto out;
-
+		return FALSE;
 	if (!GST_IS_ELEMENT(element))
-		goto out;
+		return FALSE;
 
 	g_object_get (G_OBJECT (element), "caps", &caps, NULL);
+	if (!GST_IS_CAPS(caps))
+		return FALSE;
 
-	if (!GST_IS_CAPS(caps) || gst_caps_is_empty (caps) )
+	if (gst_caps_is_empty(caps))
 		goto out;
 
 	GST_DEBUG ("current caps %" GST_PTR_FORMAT, caps);
@@ -177,7 +183,7 @@ static gboolean gst_get_capsprop(App *app, GstElement *element, const gchar* pro
 	GST_DEBUG ("%" GST_PTR_FORMAT"'s %s = %i", element, prop_name, *value);
 	ret = TRUE;
 out:
-	if (caps)
+	if (GST_IS_CAPS(caps))
 		gst_caps_unref(caps);
 	return ret;
 }
@@ -185,9 +191,9 @@ out:
 static void get_source_properties (App *app)
 {
 	SourceProperties *p = &app->source_properties;
-	if (app->asrc)
+	if (GST_IS_ELEMENT(app->asrc))
 		g_object_get (G_OBJECT (app->asrc), "bitrate", &p->audioBitrate, NULL);
-	if (app->vsrc)
+	if (GST_IS_ELEMENT(app->vsrc))
 	{
 		g_object_get (G_OBJECT (app->vsrc), "bitrate", &p->videoBitrate, NULL);
 		gst_get_capsprop(app, app->vsrc, "width", &p->width);
@@ -199,12 +205,12 @@ static void get_source_properties (App *app)
 static void apply_source_properties (App *app)
 {
 	SourceProperties *p = &app->source_properties;
-	if (app->asrc)
+	if (GST_IS_ELEMENT(app->asrc))
 	{
 		if (p->audioBitrate)
 			g_object_set (G_OBJECT (app->asrc), "bitrate", p->audioBitrate, NULL);
 	}
-	if (app->vsrc)
+	if (GST_IS_ELEMENT(app->vsrc))
 	{
 		if (p->videoBitrate)
 			g_object_set (G_OBJECT (app->vsrc), "bitrate", p->videoBitrate, NULL);
@@ -282,7 +288,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	else if (g_strcmp0 (property_name, "inputMode") == 0)
 	{
 		inputMode input_mode = -1;
-		if (app->asrc)
+		if (GST_IS_ELEMENT(app->asrc))
 		{
 			g_object_get (G_OBJECT (app->asrc), "input_mode", &input_mode, NULL);
 			return g_variant_new_int32 (input_mode);
@@ -301,7 +307,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	else if (g_strcmp0 (property_name, "audioBitrate") == 0)
 	{
 		gint rate = 0;
-		if (app->asrc)
+		if (GST_IS_ELEMENT(app->asrc))
 		{
 			g_object_get (G_OBJECT (app->asrc), "bitrate", &rate, NULL);
 			return g_variant_new_int32 (rate);
@@ -310,7 +316,7 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 	else if (g_strcmp0 (property_name, "videoBitrate") == 0)
 	{
 		gint rate = 0;
-		if (app->vsrc)
+		if (GST_IS_ELEMENT(app->vsrc))
 		{
 			g_object_get (G_OBJECT (app->vsrc), "bitrate", &rate, NULL);
 			return g_variant_new_int32 (rate);
@@ -516,7 +522,8 @@ static void on_bus_acquired (GDBusConnection *connection,
 	{
 		handle_method_call,
 		handle_get_property,
-		handle_set_property
+		handle_set_property,
+		{ 0, }
 	};
 
 	GError *error = NULL;
@@ -589,7 +596,7 @@ static gboolean message_cb (GstBus * bus, GstMessage * message, gpointer user_da
 					GST_DEBUG ("Additional ERROR debug info: %s", debug);
 // 					DREAMRTSPSERVER_UNLOCK (app);
 					disable_tcp_upstream(app);
-					if (&app->rtsp_server->state == RTSP_STATE_DISABLED)
+					if (app->rtsp_server->state == RTSP_STATE_DISABLED)
 					{
 						destroy_pipeline(app);
 						create_source_pipeline(app);
@@ -1692,7 +1699,7 @@ gboolean disable_hls_server(App *app)
 	if (h->state == HLS_STATE_IDLE)
 	{
 		DREAMRTSPSERVER_LOCK (app);
-		soup_server_quit (h->soupserver);
+		soup_server_disconnect(h->soupserver);
 		if (h->soupauthdomain)
 		{
 			g_object_unref (h->soupauthdomain);
@@ -2374,7 +2381,7 @@ static GstPadProbeReturn upstream_pad_probe_unlink_cb (GstPad * pad, GstPadProbe
 
 	GST_DEBUG_OBJECT (pad, "upstream_pad_probe_unlink_cb %" GST_PTR_FORMAT, element);
 
-	if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_IDLE && element && element == t->tstcpq)
+	if ((GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_IDLE) && element && element == t->tstcpq)
 	{
 		GstPad *teepad;
 		teepad = gst_pad_get_peer(pad);
