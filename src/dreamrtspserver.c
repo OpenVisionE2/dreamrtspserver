@@ -1770,7 +1770,11 @@ gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar 
 		h->port = port;
 		h->soupserver = soup_server_new (SOUP_SERVER_PORT, h->port, SOUP_SERVER_SERVER_HEADER, "dreamhttplive", NULL);
 		soup_server_add_handler (h->soupserver, NULL, soup_server_callback, app, NULL);
+#if SOUP_CHECK_VERSION(2,48,0)
+		soup_server_listen_local(h->soupserver, port, 0, NULL);
+#else
 		soup_server_run_async (h->soupserver);
+#endif
 
 		gchar *credentials = g_strdup("");
 		if (strlen(user)) {
@@ -1791,7 +1795,18 @@ gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar 
 			h->soupauthdomain = NULL;
 		}
 
+#if SOUP_CHECK_VERSION(2,48,0)
+		GSList *uris = soup_server_get_uris(h->soupserver);
+		for (GSList *uri = uris; uri != NULL; uri = uri->next) {
+			char *str = soup_uri_to_string(uri->data, FALSE);
+			GST_INFO_OBJECT(h->soupserver, "SOUP HLS server ready at %s [/%s] (%s)", str, HLS_PLAYLIST_NAME, credentials);
+			g_free(str);
+			soup_uri_free(uri->data);
+		}
+		g_slist_free(uris);
+#else
 		GST_INFO_OBJECT (h->soupserver, "SOUP HLS server ready at http://%s127.0.0.1:%i/%s ...", credentials, soup_server_get_port (h->soupserver), HLS_PLAYLIST_NAME);
+#endif
 
 		h->state = HLS_STATE_IDLE;
 		send_signal (app, "hlsStateChanged", g_variant_new("(i)", HLS_STATE_IDLE));
