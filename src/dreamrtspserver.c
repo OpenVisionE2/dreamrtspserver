@@ -1037,7 +1037,7 @@ static GstFlowReturn handover_payload (GstElement * appsink, gpointer user_data)
 			{
 				GST_LOG("GST_BUFFER_FLAG_DELTA_UNIT dropping!");
 				gst_sample_unref(sample);
-				DREAMRTSPSERVER_UNLOCK (app);
+//				DREAMRTSPSERVER_UNLOCK (app);
 				return GST_FLOW_OK;
 			}
 			else if (appsink == r->vappsink || appsink == r->tsappsink)
@@ -2133,7 +2133,7 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 		app->tsmux = NULL;
 		if (gst_element_set_state (app->pipeline, GST_STATE_READY) != GST_STATE_CHANGE_SUCCESS)
 			GST_WARNING_OBJECT (pad, "error bringing pipeline back to ready");
-		DREAMRTSPSERVER_UNLOCK (app);
+//		DREAMRTSPSERVER_UNLOCK (app);
 		GST_DEBUG_OBJECT (pad, "finished unlinking and removing sources and tsmux");
 		return GST_PAD_PROBE_REMOVE;
 	}
@@ -2193,7 +2193,7 @@ static GstPadProbeReturn tsmux_pad_probe_unlink_cb (GstPad * pad, GstPadProbeInf
 	}
 
 fail:
-	DREAMRTSPSERVER_UNLOCK (app);
+//	DREAMRTSPSERVER_UNLOCK (app);
 	return GST_PAD_PROBE_REMOVE;
 }
 
