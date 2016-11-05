@@ -1768,13 +1768,15 @@ gboolean enable_hls_server(App *app, guint port, const gchar *user, const gchar 
 		}
 
 		h->port = port;
-		h->soupserver = soup_server_new (SOUP_SERVER_PORT, h->port, SOUP_SERVER_SERVER_HEADER, "dreamhttplive", NULL);
-		soup_server_add_handler (h->soupserver, NULL, soup_server_callback, app, NULL);
+
 #if SOUP_CHECK_VERSION(2,48,0)
-		soup_server_listen_local(h->soupserver, port, 0, NULL);
+		h->soupserver = soup_server_new (SOUP_SERVER_SERVER_HEADER, "dreamhttplive", NULL);
+		soup_server_listen_all(h->soupserver, port, 0, NULL);
 #else
+		h->soupserver = soup_server_new (SOUP_SERVER_PORT, h->port, SOUP_SERVER_SERVER_HEADER, "dreamhttplive", NULL);
 		soup_server_run_async (h->soupserver);
 #endif
+		soup_server_add_handler (h->soupserver, NULL, soup_server_callback, app, NULL);
 
 		gchar *credentials = g_strdup("");
 		if (strlen(user)) {
