@@ -140,6 +140,47 @@ out:
 	return ret;
 }
 
+static gboolean gst_set_profile(App *app, int value)
+{
+	GstCaps *oldcaps = NULL;
+	GstCaps *newcaps = NULL;
+	GstStructure *structure;
+	gboolean ret = FALSE;
+
+	if (!app->pipeline)
+		return FALSE;
+	if (!GST_IS_ELEMENT(app->vsrc))
+		return FALSE;
+
+	g_object_get (G_OBJECT (app->vsrc), "caps", &oldcaps, NULL);
+	if (!GST_IS_CAPS(oldcaps))
+		return FALSE;
+
+	GST_DEBUG("set profile %d... old caps %" GST_PTR_FORMAT, value, oldcaps);
+
+	newcaps = gst_caps_make_writable(oldcaps);
+	structure = gst_caps_steal_structure (newcaps, 0);
+	if (!structure)
+		goto out;
+
+	if (value == 1)
+		gst_structure_set (structure, "profile", G_TYPE_STRING, "high", NULL);
+	else
+		gst_structure_set (structure, "profile", G_TYPE_STRING, "main", NULL);
+
+	gst_caps_append_structure (newcaps, structure);
+	GST_INFO("new caps %" GST_PTR_FORMAT, newcaps);
+	g_object_set (G_OBJECT (app->vsrc), "caps", newcaps, NULL);
+	ret = TRUE;
+
+out:
+	if (GST_IS_CAPS(oldcaps))
+		gst_caps_unref(oldcaps);
+	if (GST_IS_CAPS(newcaps))
+		gst_caps_unref(newcaps);
+	return ret;
+}
+
 static gboolean gst_get_capsprop(App *app, GstElement *element, const gchar* prop_name, guint32 *value)
 {
 	GstCaps *caps = NULL;
@@ -172,7 +213,7 @@ static gboolean gst_get_capsprop(App *app, GstElement *element, const gchar* pro
 		else
 			*value = 0;
 	}
-	else if ((g_strcmp0 (prop_name, "width") == 0 || g_strcmp0 (prop_name, "height") == 0) && value)
+	else if ((g_strcmp0 (prop_name, "width") == 0 || g_strcmp0 (prop_name, "height") == 0 || g_strcmp0 (prop_name, "profile") == 0) && value)
 	{
 		if (!gst_structure_get_uint(structure, prop_name, value))
 			*value = 0;
@@ -196,9 +237,17 @@ static void get_source_properties (App *app)
 	if (GST_IS_ELEMENT(app->vsrc))
 	{
 		g_object_get (G_OBJECT (app->vsrc), "bitrate", &p->videoBitrate, NULL);
+		g_object_get (G_OBJECT (app->vsrc), "gop-length", &p->gopLength, NULL);
+		g_object_get (G_OBJECT (app->vsrc), "gop-scene", &p->gopOnSceneChange, NULL);
+		g_object_get (G_OBJECT (app->vsrc), "bframes", &p->bFrames, NULL);
+		g_object_get (G_OBJECT (app->vsrc), "pframes", &p->pFrames, NULL);
+		g_object_get (G_OBJECT (app->vsrc), "slices", &p->slices, NULL);
+		g_object_get (G_OBJECT (app->vsrc), "level", &p->level, NULL);
+
 		gst_get_capsprop(app, app->vsrc, "width", &p->width);
 		gst_get_capsprop(app, app->vsrc, "height", &p->height);
 		gst_get_capsprop(app, app->vsrc, "framerate", &p->framerate);
+		gst_get_capsprop(app, app->vsrc, "profile", &p->profile);
 	}
 }
 
@@ -214,23 +263,32 @@ static void apply_source_properties (App *app)
 	{
 		if (p->videoBitrate)
 			g_object_set (G_OBJECT (app->vsrc), "bitrate", p->videoBitrate, NULL);
+
+		g_object_set (G_OBJECT (app->vsrc), "gop-length", p->gopLength, NULL);
+		g_object_set (G_OBJECT (app->vsrc), "gop-scene", p->gopOnSceneChange, NULL);
+		g_object_set (G_OBJECT (app->vsrc), "bframes", p->bFrames, NULL);
+		g_object_set (G_OBJECT (app->vsrc), "pframes", p->pFrames, NULL);
+		g_object_set (G_OBJECT (app->vsrc), "slices", p->slices, NULL);
+		g_object_set (G_OBJECT (app->vsrc), "level", p->level, NULL);
+
 		if (p->framerate)
 			gst_set_framerate(app, p->framerate);
 		if (p->width && p->height)
 			gst_set_resolution(app,  p->width, p->height);
+		gst_set_profile(app, p->profile);
 	}
 }
 
-static gboolean gst_set_bitrate (App *app, GstElement *source, gint32 value)
+static gboolean gst_set_int_property (App *app, GstElement *source, const gchar* key, gint32 value)
 {
 	if (!GST_IS_ELEMENT (source) || !value)
 		return FALSE;
 
-	g_object_set (G_OBJECT (source), "bitrate", value, NULL);
+	g_object_set (G_OBJECT (source), key, value, NULL);
 
 	gint32 checkvalue = 0;
 
-	g_object_get (G_OBJECT (source), "bitrate", &checkvalue, NULL);
+	g_object_get (G_OBJECT (source), key, &checkvalue, NULL);
 
 	if (value != checkvalue)
 		return FALSE;
@@ -238,6 +296,60 @@ static gboolean gst_set_bitrate (App *app, GstElement *source, gint32 value)
 	get_source_properties(app);
 	return TRUE;
 }
+
+static gboolean gst_set_boolean_property (App *app, GstElement *source, const gchar* key, gboolean value)
+{
+	if (!GST_IS_ELEMENT (source) || !value)
+		return FALSE;
+
+	g_object_set (G_OBJECT (source), key, value, NULL);
+
+	gboolean checkvalue = FALSE;
+
+	g_object_get (G_OBJECT (source), key, &checkvalue, NULL);
+
+	if (value != checkvalue)
+		return FALSE;
+
+	get_source_properties(app);
+	return TRUE;
+}
+
+static gboolean gst_set_bitrate (App *app, GstElement *source, gint32 value)
+{
+	return gst_set_int_property(app, source, "bitrate", value);
+}
+
+static gboolean gst_set_gop_length (App *app, gint32 value)
+{
+	return gst_set_int_property(app, app->vsrc, "gop-length", value);
+}
+
+static gboolean gst_set_gop_on_scene_change (App *app, gboolean value)
+{
+	return gst_set_boolean_property(app, app->vsrc, "gop-scene", value);
+}
+
+static gboolean gst_set_bframes (App *app, gint32 value)
+{
+	return gst_set_int_property(app, app->vsrc, "bframes", value);
+}
+
+static gboolean gst_set_pframes (App *app, gint32 value)
+{
+	return gst_set_int_property(app, app->vsrc, "pframes", value);
+}
+
+static gboolean gst_set_slices (App *app, gint32 value)
+{
+	return gst_set_int_property(app, app->vsrc, "slices", value);
+}
+
+static gboolean gst_set_level (App *app, gint32 value)
+{
+	return gst_set_int_property(app, app->vsrc, "level", value);
+}
+
 
 gboolean upstream_resume_transmitting(App *app)
 {
@@ -322,7 +434,61 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 			return g_variant_new_int32 (rate);
 		}
 	}
-	else if (g_strcmp0 (property_name, "width") == 0 || g_strcmp0 (property_name, "height") == 0 || g_strcmp0 (property_name, "framerate") == 0)
+	else if (g_strcmp0 (property_name, "gopLength") == 0)
+	{
+		gint length = 0;
+		if (GST_IS_ELEMENT(app->vsrc))
+		{
+			g_object_get (G_OBJECT (app->vsrc), "gop-length", &length, NULL);
+			return g_variant_new_int32 (length);
+		}
+	}
+	else if (g_strcmp0 (property_name, "gopOnSceneChange") == 0)
+	{
+		gboolean enabled = FALSE;
+		if (GST_IS_ELEMENT(app->vsrc))
+		{
+			g_object_get (G_OBJECT (app->vsrc), "gop-scene", &enabled, NULL);
+			return g_variant_new_boolean (enabled);
+		}
+	}
+	else if (g_strcmp0 (property_name, "bFrames") == 0)
+	{
+		gint bframes = 0;
+		if (GST_IS_ELEMENT(app->vsrc))
+		{
+			g_object_get (G_OBJECT (app->vsrc), "bframes", &bframes, NULL);
+			return g_variant_new_int32 (bframes);
+		}
+	}
+	else if (g_strcmp0 (property_name, "pFrames") == 0)
+	{
+		gint pframes = 0;
+		if (GST_IS_ELEMENT(app->vsrc))
+		{
+			g_object_get (G_OBJECT (app->vsrc), "pframes", &pframes, NULL);
+			return g_variant_new_int32 (pframes);
+		}
+	}
+	else if (g_strcmp0 (property_name, "slices") == 0)
+	{
+		gint slices = 0;
+		if (GST_IS_ELEMENT(app->vsrc))
+		{
+			g_object_get (G_OBJECT (app->vsrc), "slices", &slices, NULL);
+			return g_variant_new_int32 (slices);
+		}
+	}
+	else if (g_strcmp0 (property_name, "level") == 0)
+	{
+		gint level = 0;
+		if (GST_IS_ELEMENT(app->vsrc))
+		{
+			g_object_get (G_OBJECT (app->vsrc), "level", &level, NULL);
+			return g_variant_new_int32 (level);
+		}
+	}
+	else if (g_strcmp0 (property_name, "width") == 0 || g_strcmp0 (property_name, "height") == 0 || g_strcmp0 (property_name, "framerate") == 0 || g_strcmp0 (property_name, "profile") == 0)
 	{
 		guint32 value;
 		if (gst_get_capsprop(app, app->vsrc, property_name, &value))
@@ -379,9 +545,46 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 		if (gst_set_bitrate (app, app->vsrc, g_variant_get_int32 (value)))
 			return 1;
 	}
+	else if (g_strcmp0 (property_name, "gopLength") == 0)
+	{
+		if (gst_set_gop_length (app, g_variant_get_int32 (value)))
+			return 1;
+	}
+	else if (g_strcmp0 (property_name, "gopOnSceneChange") == 0)
+	{
+		if (gst_set_gop_on_scene_change (app, g_variant_get_boolean (value)))
+			return 1;
+	}
+	else if (g_strcmp0 (property_name, "bFrames") == 0)
+	{
+		if (gst_set_bframes (app, g_variant_get_int32 (value)))
+			return 1;
+	}
+	else if (g_strcmp0 (property_name, "pFrames") == 0)
+	{
+		if (gst_set_pframes (app, g_variant_get_int32 (value)))
+			return 1;
+	}
+	else if (g_strcmp0 (property_name, "slices") == 0)
+	{
+		if (gst_set_slices (app, g_variant_get_int32 (value)))
+			return 1;
+	}
+	else if (g_strcmp0 (property_name, "level") == 0)
+	{
+		if (gst_set_level (app, g_variant_get_int32 (value)))
+			return 1;
+	}
 	else if (g_strcmp0 (property_name, "framerate") == 0)
 	{
 		if (gst_set_framerate(app, g_variant_get_int32 (value)))
+			return 1;
+		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] can't set property '%s' to %d", property_name, g_variant_get_int32 (value));
+		return 0;
+	}
+	else if (g_strcmp0 (property_name, "profile") == 0)
+	{
+		if (gst_set_profile(app, g_variant_get_int32 (value)))
 			return 1;
 		g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "[RTSPserver] can't set property '%s' to %d", property_name, g_variant_get_int32 (value));
 		return 0;
@@ -2525,6 +2728,11 @@ int main (int argc, char *argv[])
 
 	memset (&app, 0, sizeof(app));
 	memset (&app.source_properties, 0, sizeof(SourceProperties));
+	app.source_properties.gopLength = 0; //auto
+	app.source_properties.gopOnSceneChange = FALSE;
+	app.source_properties.bFrames = 2; //default
+	app.source_properties.pFrames = 1; //default
+	app.source_properties.profile = 0; //main
 	g_mutex_init (&app.rtsp_mutex);
 
 	introspection_data = g_dbus_node_info_new_for_xml (introspection_xml, NULL);

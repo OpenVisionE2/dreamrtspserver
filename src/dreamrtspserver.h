@@ -154,8 +154,9 @@ typedef struct {
 } DreamRTSPserver;
 
 typedef struct {
-	gint audioBitrate, videoBitrate;
-	guint framerate, width, height;
+	gint32 audioBitrate, videoBitrate, gopLength, bFrames, pFrames, slices;
+	guint framerate, width, height, profile, level;
+	gboolean gopOnSceneChange;
 } SourceProperties;
 
 typedef struct {
@@ -199,8 +200,15 @@ static const gchar introspection_xml[] =
   "    <property type='i' name='sourceState' access='read'/>"
   "    <property type='i' name='audioBitrate' access='readwrite'/>"
   "    <property type='i' name='videoBitrate' access='readwrite'/>"
+  "    <property type='i' name='gopLength' access='readwrite'/>"
+  "    <property type='b' name='gopOnSceneChange' access='readwrite'/>"
+  "    <property type='i' name='bFrames' access='readwrite'/>"
+  "    <property type='i' name='pFrames' access='readwrite'/>"
+  "    <property type='i' name='slices' access='readwrite'/>"
   "    <property type='i' name='framerate' access='readwrite'/>"
   "    <property type='i' name='inputMode' access='readwrite'/>"
+  "    <property type='i' name='profile' access='readwrite'/>"
+  "    <property type='i' name='level' access='readwrite'/>"
   "    <property type='i' name='width' access='read'/>"
   "    <property type='i' name='height' access='read'/>"
   "    <method name='setResolution'>"
