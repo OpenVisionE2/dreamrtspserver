@@ -213,7 +213,20 @@ static gboolean gst_get_capsprop(App *app, GstElement *element, const gchar* pro
 		else
 			*value = 0;
 	}
-	else if ((g_strcmp0 (prop_name, "width") == 0 || g_strcmp0 (prop_name, "height") == 0 || g_strcmp0 (prop_name, "profile") == 0) && value)
+	else if (g_strcmp0 (prop_name, "profile") == 0 && value)
+	{
+		const gchar* profile = gst_structure_get_string(structure, "profile");
+		*value = 0;
+		if (!profile)
+			GST_WARNING("profile missing in caps! returned main profile");
+		else if (g_strcmp0 (profile, "high") == 0)
+			*value = 1;
+		else if (g_strcmp0 (profile, "main") == 0)
+			*value = 1;
+		else
+			GST_WARNING("unknown profile '%s' in caps! returned main profile", profile);
+	}
+	else if ((g_strcmp0 (prop_name, "width") == 0 || g_strcmp0 (prop_name, "height") == 0) && value)
 	{
 		if (!gst_structure_get_uint(structure, prop_name, value))
 			*value = 0;
