@@ -156,7 +156,7 @@ typedef struct {
 typedef struct {
 	gint32 audioBitrate, videoBitrate, gopLength, bFrames, pFrames, slices;
 	guint framerate, width, height, profile, level;
-	gboolean gopOnSceneChange;
+	gboolean gopOnSceneChange, openGop;
 } SourceProperties;
 
 typedef struct {
@@ -202,6 +202,7 @@ static const gchar introspection_xml[] =
   "    <property type='i' name='videoBitrate' access='readwrite'/>"
   "    <property type='i' name='gopLength' access='readwrite'/>"
   "    <property type='b' name='gopOnSceneChange' access='readwrite'/>"
+  "    <property type='b' name='openGop' access='readwrite'/>"
   "    <property type='i' name='bFrames' access='readwrite'/>"
   "    <property type='i' name='pFrames' access='readwrite'/>"
   "    <property type='i' name='slices' access='readwrite'/>"

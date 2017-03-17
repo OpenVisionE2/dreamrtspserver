@@ -239,6 +239,7 @@ static void get_source_properties (App *app)
 		g_object_get (G_OBJECT (app->vsrc), "bitrate", &p->videoBitrate, NULL);
 		g_object_get (G_OBJECT (app->vsrc), "gop-length", &p->gopLength, NULL);
 		g_object_get (G_OBJECT (app->vsrc), "gop-scene", &p->gopOnSceneChange, NULL);
+		g_object_get (G_OBJECT (app->vsrc), "open-gop", &p->openGop, NULL);
 		g_object_get (G_OBJECT (app->vsrc), "bframes", &p->bFrames, NULL);
 		g_object_get (G_OBJECT (app->vsrc), "pframes", &p->pFrames, NULL);
 		g_object_get (G_OBJECT (app->vsrc), "slices", &p->slices, NULL);
@@ -266,6 +267,7 @@ static void apply_source_properties (App *app)
 
 		g_object_set (G_OBJECT (app->vsrc), "gop-length", p->gopLength, NULL);
 		g_object_set (G_OBJECT (app->vsrc), "gop-scene", p->gopOnSceneChange, NULL);
+		g_object_set (G_OBJECT (app->vsrc), "open-gop", p->openGop, NULL);
 		g_object_set (G_OBJECT (app->vsrc), "bframes", p->bFrames, NULL);
 		g_object_set (G_OBJECT (app->vsrc), "pframes", p->pFrames, NULL);
 		g_object_set (G_OBJECT (app->vsrc), "slices", p->slices, NULL);
@@ -279,9 +281,9 @@ static void apply_source_properties (App *app)
 	}
 }
 
-static gboolean gst_set_int_property (App *app, GstElement *source, const gchar* key, gint32 value)
+static gboolean gst_set_int_property (App *app, GstElement *source, const gchar* key, gint32 value, gboolean zero_allowed)
 {
-	if (!GST_IS_ELEMENT (source) || !value)
+	if (!GST_IS_ELEMENT (source) || (!value && !zero_allowed))
 		return FALSE;
 
 	g_object_set (G_OBJECT (source), key, value, NULL);
@@ -299,7 +301,7 @@ static gboolean gst_set_int_property (App *app, GstElement *source, const gchar*
 
 static gboolean gst_set_boolean_property (App *app, GstElement *source, const gchar* key, gboolean value)
 {
-	if (!GST_IS_ELEMENT (source) || !value)
+	if (!GST_IS_ELEMENT (source))
 		return FALSE;
 
 	g_object_set (G_OBJECT (source), key, value, NULL);
@@ -317,12 +319,12 @@ static gboolean gst_set_boolean_property (App *app, GstElement *source, const gc
 
 static gboolean gst_set_bitrate (App *app, GstElement *source, gint32 value)
 {
-	return gst_set_int_property(app, source, "bitrate", value);
+	return gst_set_int_property(app, source, "bitrate", value, FALSE);
 }
 
 static gboolean gst_set_gop_length (App *app, gint32 value)
 {
-	return gst_set_int_property(app, app->vsrc, "gop-length", value);
+	return gst_set_int_property(app, app->vsrc, "gop-length", value, TRUE);
 }
 
 static gboolean gst_set_gop_on_scene_change (App *app, gboolean value)
@@ -330,26 +332,30 @@ static gboolean gst_set_gop_on_scene_change (App *app, gboolean value)
 	return gst_set_boolean_property(app, app->vsrc, "gop-scene", value);
 }
 
+static gboolean gst_set_open_gop (App *app, gboolean value)
+{
+	return gst_set_boolean_property(app, app->vsrc, "open-gop", value);
+}
+
 static gboolean gst_set_bframes (App *app, gint32 value)
 {
-	return gst_set_int_property(app, app->vsrc, "bframes", value);
+	return gst_set_int_property(app, app->vsrc, "bframes", value, TRUE);
 }
 
 static gboolean gst_set_pframes (App *app, gint32 value)
 {
-	return gst_set_int_property(app, app->vsrc, "pframes", value);
+	return gst_set_int_property(app, app->vsrc, "pframes", value, TRUE);
 }
 
 static gboolean gst_set_slices (App *app, gint32 value)
 {
-	return gst_set_int_property(app, app->vsrc, "slices", value);
+	return gst_set_int_property(app, app->vsrc, "slices", value, TRUE);
 }
 
 static gboolean gst_set_level (App *app, gint32 value)
 {
-	return gst_set_int_property(app, app->vsrc, "level", value);
+	return gst_set_int_property(app, app->vsrc, "level", value, TRUE);
 }
-
 
 gboolean upstream_resume_transmitting(App *app)
 {
@@ -449,6 +455,15 @@ static GVariant *handle_get_property (GDBusConnection  *connection,
 		if (GST_IS_ELEMENT(app->vsrc))
 		{
 			g_object_get (G_OBJECT (app->vsrc), "gop-scene", &enabled, NULL);
+			return g_variant_new_boolean (enabled);
+		}
+	}
+	else if (g_strcmp0 (property_name, "openGop") == 0)
+	{
+		gboolean enabled = FALSE;
+		if (GST_IS_ELEMENT(app->vsrc))
+		{
+			g_object_get (G_OBJECT (app->vsrc), "open-gop", &enabled, NULL);
 			return g_variant_new_boolean (enabled);
 		}
 	}
@@ -553,6 +568,11 @@ static gboolean handle_set_property (GDBusConnection  *connection,
 	else if (g_strcmp0 (property_name, "gopOnSceneChange") == 0)
 	{
 		if (gst_set_gop_on_scene_change (app, g_variant_get_boolean (value)))
+			return 1;
+	}
+	else if (g_strcmp0 (property_name, "openGop") == 0)
+	{
+		if (gst_set_open_gop (app, g_variant_get_boolean (value)))
 			return 1;
 	}
 	else if (g_strcmp0 (property_name, "bFrames") == 0)
@@ -2730,6 +2750,7 @@ int main (int argc, char *argv[])
 	memset (&app.source_properties, 0, sizeof(SourceProperties));
 	app.source_properties.gopLength = 0; //auto
 	app.source_properties.gopOnSceneChange = FALSE;
+	app.source_properties.openGop = FALSE;
 	app.source_properties.bFrames = 2; //default
 	app.source_properties.pFrames = 1; //default
 	app.source_properties.profile = 0; //main
